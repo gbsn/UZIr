@@ -22,8 +22,12 @@
 --   getVehicleKills(player)        - total de atropelamentos (todo o save)
 --   getInvalidTotal(player)        - fogo + atropelamento somados
 --   getHoursAlive(player)          - horas de vida do personagem atual
---   getLiveLines(player)           - linhas h/D/W/M/Y ja desbloqueadas
+--   getLiveLines(player)           - linhas Hours/Days/Week/Month/Year ja desbloqueadas
 --   getKillCountLine(player)       - string "zKILL 0000" pronta pro HUD
+--   getWeightLine(player)          - string "Weight-85.5" pronta pro HUD
+--   getWeightStatus(player)        - {text, r, g, b} High Weight/Regular/Under Weight
+--   getWeightIndicator(player)     - {symbol, r, g, b} seta/circulo de tendencia de peso
+--   getSeasonInfo()                - estacao atual, mes atual, mes inicio/fim da estacao
 --   getTodayValidBreakdown(player) - kills validos acumulados HOJE (ao vivo)
 --   getDailyHistory(player)        - snapshots de dias passados (sleep report)
 --   snapshotAndResetToday(player)  - ver aviso na propria funcao
@@ -64,9 +68,11 @@ end
 
 -- Chamado a cada hora de jogo (Events.EveryHours). Incrementa o
 -- contador de horas vivas (fallback caso o jogo nao exponha um getter
--- nativo equivalente) e aproveita para atualizar a marca de "debug
--- usado neste save", ja que checar isso a cada hora e barato o
--- suficiente e nao precisa ser por frame.
+-- nativo equivalente), atualiza a marca de "debug usado neste save", e
+-- tambem amostra o peso atual para calcular a TENDENCIA (emagrecendo/
+-- estavel/engordando) - ver comentario de WEIGHT_STABLE_EPSILON abaixo.
+local WEIGHT_STABLE_EPSILON = 0.1 -- kg: variacao menor que isso conta como "estavel"
+
 local function onEveryHour()
     local player = Tracker.getPlayer()
     if not player then return end
@@ -79,6 +85,25 @@ local function onEveryHour()
 
     local modData = player:getModData()
     modData.UZIR_hoursAlive = (modData.UZIR_hoursAlive or 0) + 1
+
+    -- Nao existe uma funcao nativa documentada "getWeightTrend()" no Lua
+    -- do jogo, entao calculamos por conta propria: comparamos o peso
+    -- atual com a ultima amostra guardada, hora a hora.
+    local okW, weight = pcall(function() return player:getNutrition():getWeight() end)
+    if okW and type(weight) == "number" then
+        local previous = modData.UZIR_lastWeightSample
+        if previous ~= nil then
+            local delta = weight - previous
+            if delta > WEIGHT_STABLE_EPSILON then
+                modData.UZIR_weightTrend = "up"
+            elseif delta < -WEIGHT_STABLE_EPSILON then
+                modData.UZIR_weightTrend = "down"
+            else
+                modData.UZIR_weightTrend = "stable"
+            end
+        end
+        modData.UZIR_lastWeightSample = weight
+    end
 end
 
 -- Numero de zumbis mortos pelo personagem (KillCount oficial do jogo).
@@ -386,32 +411,155 @@ function Tracker.getKillCountLine(player)
 end
 
 -- Linhas do bloco "Live", desbloqueadas progressivamente:
---   h aparece desde o inicio (0-23)
---   D aparece só depois de completar 24h (1 dia)
---   W aparece só depois de completar 7 dias
---   M aparece só depois de completar 30 dias
---   Y aparece só depois de completar 365 dias
+--   Hours aparece desde o inicio (0-23)
+--   Days  aparece só depois de completar 24h (1 dia)
+--   Week  aparece só depois de completar 7 dias
+--   Month aparece só depois de completar 30 dias
+--   Year  aparece só depois de completar 365 dias
 -- Cada uma nasce numa linha nova, dando a impressao de avanco/conquista.
+-- Os rotulos foram renomeados a pedido dos jogadores que testaram o mod
+-- (antes eram so "h"/"D"/"W"/"M"/"Y"). Hours/Days/Week/Month usam no
+-- minimo 2 casas (crescem sozinhas se passarem de 99); Year usa so 1
+-- casa minima, tambem crescendo conforme necessario.
 function Tracker.getLiveLines(player)
     local totalHours = Tracker.getHoursAlive(player)
     local h, d, w, m, y = splitHoursIntoUnits(totalHours)
 
-    local lines = {string.format("h%02d", h)}
+    local lines = {string.format("Hours-%02d", h)}
 
     if totalHours >= 24 then
-        table.insert(lines, string.format("D%02d", d))
+        table.insert(lines, string.format("Days-%02d", d))
     end
     if totalHours >= 24 * 7 then
-        table.insert(lines, string.format("W%02d", w))
+        table.insert(lines, string.format("Week-%02d", w))
     end
     if totalHours >= 24 * 30 then
-        table.insert(lines, string.format("M%02d", m))
+        table.insert(lines, string.format("Month-%02d", m))
     end
     if totalHours >= 24 * 365 then
-        table.insert(lines, string.format("Y%02d", y))
+        table.insert(lines, string.format("Year-%d", y))
     end
 
     return lines
+end
+
+-- ================== Char Info: peso do personagem ==================
+
+-- Peso atual do personagem, no formato "Weight-85.5" (uma casa decimal).
+--
+-- ATENCAO (bug corrigido): a primeira tentativa usava player:getWeight()
+-- direto, mas esse metodo pertence a hierarquia de IsoMovingObject e
+-- retorna um valor de fisica/colisao (viemos a ver "0.3" na tela, sem
+-- nenhuma relacao com o peso corporal de verdade). O peso que aparece
+-- no painel de Info do personagem ("Peso 77") vem do sistema de
+-- Nutricao, entao usamos player:getNutrition():getWeight() agora.
+function Tracker.getWeightLine(player)
+    player = player or Tracker.getPlayer()
+    if not player then return "Weight-00.0" end
+
+    local ok, weight = pcall(function() return player:getNutrition():getWeight() end)
+    if not (ok and type(weight) == "number") then
+        return "Weight-00.0"
+    end
+
+    return string.format("Weight-%.1f", weight)
+end
+
+-- Status do peso, mostrado so ao passar o mouse (ver UZIR_HUD.lua):
+--   >= 85kg        -> "High Weight"  (vermelho)
+--   75kg ate 84kg  -> "Regular"      (verde)
+--   <= 74kg        -> "Under Weight" (vermelho)
+-- Faixas definidas a pedido do autor; ajuste aqui se os limites do jogo
+-- mudarem ou se quiser afinar os numeros depois de testar.
+function Tracker.getWeightStatus(player)
+    player = player or Tracker.getPlayer()
+    if not player then return {text = "Regular", r = 0, g = 1, b = 0} end
+
+    local ok, weight = pcall(function() return player:getNutrition():getWeight() end)
+    if not (ok and type(weight) == "number") then
+        return {text = "Regular", r = 0, g = 1, b = 0}
+    end
+
+    if weight >= 85 then
+        return {text = "High Weight", r = 1, g = 0.2, b = 0.2}
+    elseif weight >= 75 then
+        return {text = "Regular", r = 0.2, g = 1, b = 0.2}
+    else
+        return {text = "Under Weight", r = 1, g = 0.2, b = 0.2}
+    end
+end
+
+-- Indicador visual da tendencia de peso (seta/circulo + cor), pronto
+-- para o HUD desenhar do lado do "Weight-XX.X":
+--   engordando -> seta para cima, verde
+--   estavel    -> circulo, amarelo
+--   emagrecendo -> seta para baixo, vermelho
+-- Antes da primeira hora de amostragem (personagem recem criado), o
+-- padrao e "estavel" ate termos dados suficientes para comparar.
+local WEIGHT_ARROW_UP = "\226\134\145"    -- ↑
+local WEIGHT_ARROW_DOWN = "\226\134\147" -- ↓
+local WEIGHT_CIRCLE = "\226\151\143"     -- ●
+
+function Tracker.getWeightIndicator(player)
+    player = player or Tracker.getPlayer()
+    if not player then
+        return {symbol = WEIGHT_CIRCLE, r = 1, g = 1, b = 0}
+    end
+
+    local trend = player:getModData().UZIR_weightTrend
+
+    if trend == "up" then
+        return {symbol = WEIGHT_ARROW_UP, r = 0.2, g = 1, b = 0.2}
+    elseif trend == "down" then
+        return {symbol = WEIGHT_ARROW_DOWN, r = 1, g = 0.2, b = 0.2}
+    else
+        return {symbol = WEIGHT_CIRCLE, r = 1, g = 1, b = 0}
+    end
+end
+
+-- ================== Game Info: estacao atual do jogo ==================
+-- ATENCAO: nao existe uma funcao nativa documentada "getSeason()" no
+-- Lua do jogo. Calculamos a estacao a partir do mes atual, seguindo o
+-- padrao de hemisferio norte (o jogo se passa em Knox County, Kentucky):
+--   Winter: Dez, Jan, Fev   Spring: Mar, Abr, Mai
+--   Summer: Jun, Jul, Ago   Autumn: Set, Out, Nov
+
+local MONTH_NAMES = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+}
+
+local SEASON_BY_MONTH = {
+    [1] = "Winter", [2] = "Winter", [3] = "Spring", [4] = "Spring", [5] = "Spring",
+    [6] = "Summer", [7] = "Summer", [8] = "Summer",
+    [9] = "Autumn", [10] = "Autumn", [11] = "Autumn", [12] = "Winter",
+}
+
+local SEASON_RANGE = {
+    Winter = {12, 2},
+    Spring = {3, 5},
+    Summer = {6, 8},
+    Autumn = {9, 11},
+}
+
+-- Mes atual do jogo (1-12). getGameTime():getMonth() retorna 0-11 (base
+-- 0), por isso somamos 1. Se por algum motivo a chamada falhar, caimos
+-- em Janeiro (1) em vez de quebrar.
+local function getCurrentGameMonth()
+    local ok, month0 = pcall(function() return getGameTime():getMonth() end)
+    if ok and type(month0) == "number" then
+        return month0 + 1
+    end
+    return 1
+end
+
+-- Retorna: nome da estacao, mes atual, mes de inicio da estacao, mes de
+-- fim da estacao (todos numeros 1-12).
+function Tracker.getSeasonInfo()
+    local currentMonth = getCurrentGameMonth()
+    local season = SEASON_BY_MONTH[currentMonth] or "Spring"
+    local range = SEASON_RANGE[season]
+    return season, currentMonth, range[1], range[2]
 end
 
 -- ================== Registro dos eventos do jogo ==================
