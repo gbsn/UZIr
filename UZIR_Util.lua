@@ -1,0 +1,5 @@
+name=UZIR - Ultimate Zombie Interconnected Ranking
+poster=poster.png
+description=UZI: rastreia mortes de zumbis e tempo de vida do personagem, mostrando as informacoes na tela em um painel movel. Base para futuro ranking online interconectado.
+id=UZIR
+modversion=1
