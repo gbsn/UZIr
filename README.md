@@ -32,3 +32,17 @@ Só um aviso antes de qualquer coisa: isso aqui é uma intenção, não uma prom
 - Site de ranking público, pra comparar resultados com outros jogadores
 - Separar rankings por modo de jogo (Apocalypse, Survivor, Builder...) — pra você só competir contra quem joga do mesmo jeito
 - Publicação oficial no Steam Workshop
+
+## A história por trás do código
+
+Tudo começou com uma pergunta simples: como saber se seu personagem de meses vivo é bom, se cada save de Zomboid vive isolado no próprio mundinho? Dali nasceu a ideia do UZIr — um contador de kills e tempo de vida que um dia vira ranking de verdade.
+
+**A primeira versão** foi só um painel simples: zumbis mortos, tempo vivo. Simples no papel, mas o Project Zomboid tinha outros planos. A primeira tentativa de instalação nem apareceu na lista de mods — a pasta estava um nível errado dentro de `Zomboid/mods/`. Resolvido isso, esbarramos numa pegadinha própria do Build 42: diferente do 41, ele exige uma estrutura dividida entre `common/` (o código) e `42/` (só o manifesto) — e a gente tinha feito exatamente o contrário. Ajustado, o mod apareceu... em vermelho, marcado como quebrado. Foi aí que descobrimos, comparando com outro mod funcionando, que uma linha `require=` vazia no `mod.info` estava sendo lida como "depende de um mod com nome em branco". Tirando essa linha, finalmente rodou.
+
+**Depois veio o visual.** Renomeamos pra UZIR, demos a cara "UZI" ao painel, e fomos ajustando: ícone de infectado, transparência, um "+1" flutuante toda vez que um zumbi cai. Foi nessa fase que percebemos algo que o próprio jogo esconde: zumbi morto por fogo não conta pro kill count oficial. Em vez de brigar com isso, decidimos abraçar — e passamos a rastrear fogo e atropelamento como categorias próprias, separadas do total "oficial".
+
+**O relatório de sono** trouxe o bug mais chato do projeto: os números zeravam sozinhos enquanto o relatório estava aberto. A causa era o reset acontecer à meia-noite do jogo, que podia cair bem no meio do sono do personagem. A solução foi mudar o gatilho do reset pro momento exato em que o personagem dorme, não mais pro relógio do mundo — e o bug sumiu de vez. Depois vieram o histórico navegável entre dias, o botão de fechar manual, e uma tentativa de pausar o jogo ao acordar que não funcionou 100% e ficou registrada como pendência, não escondida.
+
+**Por fim, uma auditoria de segurança séria.** Reescrevemos boa parte do código pra reduzir o que outros mods (ou scripts mal-intencionados) conseguiriam mexer nos nossos dados, corrigimos um bug real de reaproveitamento de instância de zumbi que podia inflar kills por engano, e documentamos com todas as letras o que este mod PODE e NÃO PODE garantir em termos de integridade — sem fingir uma proteção que só existiria de verdade no futuro servidor do ranking.
+
+Cada etapa dessas foi testada dentro do jogo antes de seguir pra próxima. Nenhuma delas acertou de primeira — e tudo bem, é assim que se constrói isso.
