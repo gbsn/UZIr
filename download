@@ -1,0 +1,585 @@
+-- Este APP e idealizado por oQuasi e Claude desde 20072026 - Nao permitimos a copia. Divirta-se! Todos os Direitos Reservados
+--
+-- UZIR_HUD.lua
+-- Painel PRINCIPAL e UNICO do UZIR. Ele existe sozinho (nao ha varias
+-- janelas soltas) e cresce/encolhe para caber os blocos de informacao
+-- que estiverem ligados. Cada bloco tem sua propria moldura (retangulo
+-- com borda) para ficar visualmente separado dos outros, mas todos
+-- vivem dentro deste unico ISPanel.
+--
+-- PRIORIDADES (a pedido do autor):
+--   Prioridade 1 - zKILL (+ fogo/veiculo): SEMPRE visivel, nao pode ser
+--                  desligada. Fica logo abaixo do titulo/botao Report.
+--   Prioridade 2 - "Hora e Data" (bloco Live: Hours/Days/Week/Month/Year)
+--   Prioridade 3 - "Nutricao" (bloco Char Info: peso + tendencia)
+--   Prioridade 4 - "Clima/Estacao" (bloco Game Info: estacao + mes)
+--
+-- Prioridades 2, 3 e 4 podem ser ligadas/desligadas com o BOTAO DIREITO
+-- do mouse em qualquer lugar do painel (abre um menu de contexto). A
+-- prioridade 1 nao aparece nesse menu porque e obrigatoria.
+--
+-- POSICIONAMENTO (IMPORTANTE - historico de seguranca):
+-- Ate uma versao anterior, o jogador podia clicar e arrastar o painel
+-- inteiro para qualquer lugar da tela. Isso criava uma area GRANDE em
+-- cima do jogo que engolia cliques - inclusive cliques de ataque em
+-- zumbis, o que e um problema serio em combate. Por isso:
+--   - O clique ESQUERDO nao arrasta mais nada; a posicao so muda pelo
+--     botaozinho "⇄" (area minuscula, de proposito).
+--   - O painel comeca sempre fixo no canto SUPERIOR ESQUERDO da tela
+--     (cornerIndex = 1) na primeira vez que roda; depois disso, lembra
+--     a escolha do jogador.
+--   - O clique DIREITO (menu de ligar/desligar blocos) so e capturado
+--     quando o mouse esta sobre o painel, igual qualquer UI do jogo.
+--     Como o painel so fica nos 4 cantos (nunca no meio da tela), o
+--     risco de atrapalhar uma acao de clique direito no mundo (abrir
+--     menu de contexto em cima de algo) e bem menor que o problema
+--     original, mas nao e zero - vale ficar de olho.
+--
+-- REGRA DE ARQUITETURA: este arquivo e so APRESENTACAO. Ele nunca le ou
+-- grava em player:getModData() diretamente para DADOS DE JOGO - toda
+-- leitura desse tipo passa pelas funcoes publicas de UZIR.Tracker (ver
+-- UZIR_Tracker.lua). Preferencias de UI (posicao, blocos ligados/
+-- desligados) sao guardadas aqui mesmo, via ModData proprio, por serem
+-- config de tela e nao progresso de personagem.
+
+require "ISUI/ISPanel"
+require "ISUI/ISButton"
+require "ISUI/ISContextMenu"
+
+UZIR_HUD = ISPanel:derive("UZIR_HUD")
+
+local PANEL_WIDTH = 230
+local SCREEN_MARGIN = 20 -- distancia das bordas da tela em cada canto
+
+local TITLE_Y = 4
+local DIVIDER_Y = 24
+
+local REPORT_BUTTON_HEIGHT = 20
+local REPORT_BUTTON_GAP = 4      -- espaco entre a divisoria do titulo e o botao Report
+local CONTENT_START_Y = DIVIDER_Y + REPORT_BUTTON_GAP + REPORT_BUTTON_HEIGHT + 8
+
+local BLOCK_PADDING = 6          -- respiro interno de cada bloco (moldura)
+local BLOCK_GAP = 8              -- espaco entre um bloco e o proximo
+local ROW_HEIGHT = 20
+local LIVE_INDENT_STEP = 4       -- cada linha nova do bloco Hora/Data recua mais (efeito "escada")
+
+local BOTTOM_PADDING = 8
+
+local CORNER_BUTTON_SIZE = 18
+
+local ICON_SIZE = 18
+local ICON_X = 6
+local TEXT_WITH_ICON_X = ICON_X + ICON_SIZE + 4
+
+local BLOCK_BORDER_COLOR = {r = 1, g = 1, b = 1, a = 0.15}
+
+-- ================== "+1" flutuante ao matar zumbi ==================
+
+local FLOATER_DURATION_MS = 900
+local FLOATER_RISE_PX = 16
+local FLOATER_X = ICON_X + 4
+
+-- ================== Icones (infectado / fogo / veiculo / peso) ==================
+
+local iconCache = {}
+
+local function loadIcon(baseName)
+    if iconCache[baseName] ~= nil then return iconCache[baseName] end
+
+    local candidates = {
+        "media/textures/" .. baseName .. ".png",
+        "media/textures/" .. baseName,
+        baseName .. ".png",
+        baseName,
+    }
+
+    for _, path in ipairs(candidates) do
+        local ok, tex = pcall(function() return getTexture(path) end)
+        if ok and tex then
+            iconCache[baseName] = tex
+            return tex
+        end
+    end
+
+    iconCache[baseName] = false -- marca como "ja tentou e nao achou"
+    return false
+end
+
+local function drawIcon(self, baseName, x, y, size)
+    size = size or ICON_SIZE
+    local tex = loadIcon(baseName)
+    if not tex then return false end
+    local ok = pcall(function()
+        self:drawTextureScaled(tex, x, y, size, size, 1, 1, 1, 1)
+    end)
+    return ok
+end
+
+-- ================== Blocos ligar/desligar (clique direito) ==================
+-- Prioridade 1 (zKILL) nunca aparece aqui - e obrigatoria. Preferencia
+-- de UI, guardada separada dos dados de jogo (ver nota de arquitetura
+-- no topo do arquivo).
+
+local TOGGLABLE_BLOCKS = {
+    {key = "live", label = "Hora e Data"},
+    {key = "charinfo", label = "Nutricao"},
+    {key = "gameinfo", label = "Clima/Estacao"},
+}
+
+local function getBlockPrefsData()
+    return ModData.getOrCreate("UZIR_HUD_Blocks")
+end
+
+-- Por padrao (chave ainda nao definida), o bloco fica visivel.
+local function isBlockVisible(key)
+    local data = getBlockPrefsData()
+    if data[key] == nil then return true end
+    return data[key]
+end
+
+local function toggleBlock(key)
+    local data = getBlockPrefsData()
+    data[key] = not isBlockVisible(key)
+end
+
+-- ================== Posicao (canto da tela) ==================
+-- Guardamos so um indice de canto (1 a 4), nunca mais um x/y livre em
+-- pixels. A posicao real e recalculada a cada frame a partir do canto
+-- escolhido e do tamanho atual da tela/painel - assim funciona certo
+-- mesmo se a resolucao mudar entre sessoes. O padrao (sem preferencia
+-- salva ainda) e SEMPRE canto 1 (superior esquerdo), a pedido do autor.
+
+local CORNERS = {
+    "Superior esquerdo",
+    "Superior direito",
+    "Inferior esquerdo",
+    "Inferior direito",
+}
+
+local function getPositionData()
+    return ModData.getOrCreate("UZIR_HUD_Position")
+end
+
+local function loadCornerIndex()
+    local data = getPositionData()
+    return data.corner or 1
+end
+
+local function saveCornerIndex(index)
+    local data = getPositionData()
+    data.corner = index
+end
+
+-- Calcula o x/y real na tela para o canto atual, dado o tamanho do
+-- painel neste frame (que muda conforme os blocos ligam/desligam).
+local function computeCornerPosition(cornerIndex, panelWidth, panelHeight)
+    local screenW = getCore():getScreenWidth()
+    local screenH = getCore():getScreenHeight()
+
+    local left = SCREEN_MARGIN
+    local right = screenW - panelWidth - SCREEN_MARGIN
+    local top = SCREEN_MARGIN
+    local bottom = screenH - panelHeight - SCREEN_MARGIN
+
+    if cornerIndex == 2 then return right, top end
+    if cornerIndex == 3 then return left, bottom end
+    if cornerIndex == 4 then return right, bottom end
+    return left, top -- 1: superior esquerdo (padrao)
+end
+
+-- ================== Construcao do painel ==================
+
+function UZIR_HUD:new(x, y, width, height)
+    local o = ISPanel:new(x, y, width, height)
+    setmetatable(o, self)
+    self.__index = self
+
+    o.backgroundColor = {r = 0, g = 0, b = 0, a = 0.35}
+    o.borderColor = {r = 1, g = 1, b = 1, a = 0.25}
+
+    o.cornerIndex = loadCornerIndex()
+    o.floaters = {}
+    o.lastKillCount = nil
+
+    return o
+end
+
+function UZIR_HUD:initialise()
+    ISPanel.initialise(self)
+end
+
+function UZIR_HUD:createChildren()
+    ISPanel.createChildren(self)
+
+    -- Botao pequeno para alternar entre os 4 cantos da tela. E uma das
+    -- duas UNICAS areas clicaveis deste painel (a outra e o botao
+    -- Report) - de proposito pequena, para nunca atrapalhar cliques de
+    -- combate no resto da tela.
+    self.cornerButton = ISButton:new(
+        self:getWidth() - CORNER_BUTTON_SIZE - 4, 3,
+        CORNER_BUTTON_SIZE, CORNER_BUTTON_SIZE,
+        "\226\135\132", self, UZIR_HUD.onCycleCorner) -- "⇄"
+    self.cornerButton:initialise()
+    self.cornerButton:instantiate()
+    self:addChild(self.cornerButton)
+
+    -- Botao para abrir o Sleep Report a qualquer momento, sem precisar
+    -- dormir. Fica logo abaixo do titulo/divisoria. Largura ajustada a
+    -- cada frame em prerender, pois o painel pode mudar de tamanho.
+    self.reportButton = ISButton:new(6, DIVIDER_Y + REPORT_BUTTON_GAP, self:getWidth() - 12, REPORT_BUTTON_HEIGHT, "Report", self, UZIR_HUD.onOpenReport)
+    self.reportButton:initialise()
+    self.reportButton:instantiate()
+    self:addChild(self.reportButton)
+end
+
+-- Alterna para o proximo canto da tela (1 -> 2 -> 3 -> 4 -> 1 ...) e
+-- salva a escolha. Chamado so pelo clique no botaozinho "⇄".
+function UZIR_HUD:onCycleCorner()
+    self.cornerIndex = (self.cornerIndex % #CORNERS) + 1
+    saveCornerIndex(self.cornerIndex)
+end
+
+-- Abre o painel do relatorio mostrando o dia mais recente do historico,
+-- sem tirar um snapshot novo (snapshot so acontece de verdade quando o
+-- personagem dorme - ver UZIR_SleepReport.lua). Se ainda nao existe
+-- nenhum dia no historico, o proprio relatorio ja sabe mostrar o estado
+-- vazio normalmente.
+function UZIR_HUD:onOpenReport()
+    local report = UZIR.sleepReportInstance
+    if not report then return end
+
+    local player = UZIR.Tracker.getPlayer()
+    local history = player and UZIR.Tracker.getDailyHistory(player) or {}
+
+    report.viewIndex = #history
+    report:setVisible(true)
+    report:bringToTop()
+end
+
+-- ================== Clique direito: ligar/desligar blocos ==================
+
+function UZIR_HUD:onToggleBlockClick(key)
+    toggleBlock(key)
+end
+
+function UZIR_HUD:onRightMouseDown(x, y)
+    local player = UZIR.Tracker.getPlayer()
+    local playerNum = 0
+    local okNum, pn = pcall(function() return player:getPlayerNum() end)
+    if okNum and pn then playerNum = pn end
+
+    local absX = self:getX() + x
+    local absY = self:getY() + y
+
+    local okMenu, context = pcall(function() return ISContextMenu.get(playerNum, absX, absY) end)
+    if not (okMenu and context) then return true end
+
+    for _, block in ipairs(TOGGLABLE_BLOCKS) do
+        local visible = isBlockVisible(block.key)
+        local prefix = visible and "[X] " or "[ ] "
+        context:addOption(prefix .. block.label, self, UZIR_HUD.onToggleBlockClick, block.key)
+    end
+
+    return true
+end
+
+-- ================== Logica do "+1" flutuante ==================
+
+function UZIR_HUD:checkForNewKills(currentKills)
+    if self.lastKillCount == nil then
+        self.lastKillCount = currentKills
+        return
+    end
+
+    if currentKills > self.lastKillCount then
+        local delta = currentKills - self.lastKillCount
+        table.insert(self.floaters, {
+            text = "+" .. delta,
+            startTime = UZIR.Util.nowMs(),
+        })
+    end
+
+    self.lastKillCount = currentKills
+end
+
+function UZIR_HUD:drawFloaters(originY)
+    local now = UZIR.Util.nowMs()
+    for i = #self.floaters, 1, -1 do
+        local f = self.floaters[i]
+        local elapsed = now - f.startTime
+        if elapsed >= FLOATER_DURATION_MS then
+            table.remove(self.floaters, i)
+        else
+            local t = elapsed / FLOATER_DURATION_MS
+            local alpha = 1 - t
+            local y = (originY - 2) - (FLOATER_RISE_PX * t)
+            self:drawText(f.text, FLOATER_X, y, 1, 0.85, 0.2, alpha, UIFont.Small)
+        end
+    end
+end
+
+-- ================== Hover (sem capturar clique) ==================
+-- So usado para decidir se mostramos linhas extras (status do peso,
+-- duracao da estacao). getMouseX()/getMouseY() aqui sao metodos de
+-- instancia (posicao do mouse RELATIVA a este painel), nao globais -
+-- por isso funcionam so olhando, sem interceptar clique nenhum.
+local function isMouseHovering(self)
+    local ok, mx = pcall(function() return self:getMouseX() end)
+    local ok2, my = pcall(function() return self:getMouseY() end)
+    if not (ok and ok2) then return false end
+
+    return mx >= 0 and mx <= self:getWidth() and my >= 0 and my <= self:getHeight()
+end
+
+-- ================== Moldura de cada bloco ==================
+-- Desenha um retangulo com borda sutil ao redor da area do bloco, para
+-- separar visualmente as "prioridades" dentro do painel unico.
+local function drawBlockFrame(self, y, height)
+    self:drawRectBorder(4, y, self:getWidth() - 8, height, BLOCK_BORDER_COLOR.a, BLOCK_BORDER_COLOR.r, BLOCK_BORDER_COLOR.g, BLOCK_BORDER_COLOR.b)
+end
+
+-- ================== Renderizacao ==================
+
+function UZIR_HUD:prerender()
+    local player = UZIR.Tracker.getPlayer()
+
+    local liveLines = player and UZIR.Tracker.getLiveLines(player) or {"h00"}
+    local fireKills = player and UZIR.Tracker.getFireKills(player) or 0
+    local vehicleKills = player and UZIR.Tracker.getVehicleKills(player) or 0
+    local hovering = isMouseHovering(self)
+
+    local showLive = isBlockVisible("live")
+    local showCharInfo = isBlockVisible("charinfo")
+    local showGameInfo = isBlockVisible("gameinfo")
+
+    -- ---- Altura de cada bloco (0 se estiver desligado) ----
+
+    local block1Rows = 1 -- zKILL
+    if fireKills > 0 then block1Rows = block1Rows + 1 end
+    if vehicleKills > 0 then block1Rows = block1Rows + 1 end
+    local block1Height = BLOCK_PADDING * 2 + block1Rows * ROW_HEIGHT
+
+    local block2Height = 0
+    if showLive then
+        block2Height = BLOCK_PADDING * 2 + ROW_HEIGHT + (#liveLines * ROW_HEIGHT)
+    end
+
+    local block3Height = 0
+    if showCharInfo then
+        block3Height = BLOCK_PADDING * 2 + ROW_HEIGHT + ROW_HEIGHT + (hovering and ROW_HEIGHT or 0)
+    end
+
+    local block4Height = 0
+    if showGameInfo then
+        block4Height = BLOCK_PADDING * 2 + ROW_HEIGHT + ROW_HEIGHT + (hovering and ROW_HEIGHT or 0)
+    end
+
+    local neededHeight = CONTENT_START_Y + block1Height + BLOCK_GAP
+    if showLive then neededHeight = neededHeight + block2Height + BLOCK_GAP end
+    if showCharInfo then neededHeight = neededHeight + block3Height + BLOCK_GAP end
+    if showGameInfo then neededHeight = neededHeight + block4Height + BLOCK_GAP end
+    neededHeight = neededHeight + BOTTOM_PADDING
+
+    -- ---- Largura dinamica ----
+    -- O painel tinha largura FIXA (230px), mas linhas como a duracao da
+    -- estacao ("Summer Duration Month 6 to Month 8") sao mais largas que
+    -- isso e vazavam para fora da borda. Medimos o texto mais largo que
+    -- vai aparecer ESTE frame (considerando blocos ligados/desligados e
+    -- hover) e crescemos o painel para caber, com uma folga de seguranca.
+    local function measureWidth(text, font)
+        local ok, w = pcall(function() return getTextManager():MeasureStringX(font, text) end)
+        if ok and w then return w end
+        return #text * 8 -- estimativa grosseira caso a medicao falhe
+    end
+
+    local widestText = 0
+    local function considerWidth(text, font)
+        local w = measureWidth(text, font)
+        if w > widestText then widestText = w end
+    end
+
+    considerWidth(UZIR.Tracker.getKillCountLine(player), UIFont.Medium)
+    if fireKills > 0 then considerWidth(string.format("%04d", fireKills), UIFont.Medium) end
+    if vehicleKills > 0 then considerWidth(string.format("%04d", vehicleKills), UIFont.Medium) end
+
+    if showLive then
+        for _, line in ipairs(liveLines) do considerWidth(line, UIFont.Medium) end
+    end
+
+    if showCharInfo then
+        considerWidth(UZIR.Tracker.getWeightLine(player), UIFont.Medium)
+        if hovering then
+            considerWidth(UZIR.Tracker.getWeightStatus(player).text, UIFont.Small)
+        end
+    end
+
+    if showGameInfo then
+        local season, currentMonth, startMonth, endMonth = UZIR.Tracker.getSeasonInfo()
+        considerWidth(season .. "-Month " .. currentMonth, UIFont.Medium)
+        if hovering then
+            considerWidth(season .. " Duration Month " .. startMonth .. " to Month " .. endMonth, UIFont.Small)
+        end
+    end
+
+    local SIDE_MARGIN_ALLOWANCE = 50 -- cobre margem esquerda + icone + margem direita com folga
+    local neededWidth = math.max(PANEL_WIDTH, widestText + SIDE_MARGIN_ALLOWANCE)
+
+    if self:getWidth() ~= neededWidth then
+        self:setWidth(neededWidth)
+    end
+
+    if self:getHeight() ~= neededHeight then
+        self:setHeight(neededHeight)
+    end
+
+    -- Reposiciona o painel de acordo com o canto escolhido, recalculando
+    -- a cada frame (a altura muda, entao o canto inferior precisa ser
+    -- recalculado sempre que o painel cresce/diminui).
+    local x, y = computeCornerPosition(self.cornerIndex, self:getWidth(), neededHeight)
+    self:setX(x)
+    self:setY(y)
+
+    if self.cornerButton then
+        self.cornerButton:setX(self:getWidth() - CORNER_BUTTON_SIZE - 4)
+    end
+    if self.reportButton then
+        self.reportButton:setWidth(self:getWidth() - 12)
+    end
+
+    ISPanel.prerender(self)
+
+    -- Faixa mais escura atras do titulo, com linha divisoria sutil.
+    self:drawRect(0, 0, self:getWidth(), DIVIDER_Y, 0.25, 0, 0, 0)
+    self:drawRect(0, DIVIDER_Y - 1, self:getWidth(), 1, 0.35, 1, 1, 1)
+
+    self:drawTextCentre("UZI", self:getWidth() / 2, TITLE_Y, 1, 1, 1, 1, UIFont.Medium)
+
+    if not player then return end
+
+    local cursorY = CONTENT_START_Y
+
+    -- ================== Prioridade 1: zKILL (obrigatoria) ==================
+    drawBlockFrame(self, cursorY, block1Height)
+    local innerY = cursorY + BLOCK_PADDING
+
+    local currentKills = UZIR.Tracker.getKillCount(player)
+    self:checkForNewKills(currentKills)
+
+    local killLine = UZIR.Tracker.getKillCountLine(player)
+    local killTextX = TEXT_WITH_ICON_X
+    if not drawIcon(self, "UZIR_Infected", ICON_X, innerY - 2) then
+        killTextX = 6
+    end
+    self:drawText(killLine, killTextX, innerY, 1, 1, 1, 1, UIFont.Medium)
+    self:drawFloaters(innerY)
+    innerY = innerY + ROW_HEIGHT
+
+    if fireKills > 0 then
+        local textX = TEXT_WITH_ICON_X
+        if not drawIcon(self, "UZIR_Fire", ICON_X, innerY - 2) then
+            textX = 6
+        end
+        self:drawText(string.format("%04d", fireKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
+        innerY = innerY + ROW_HEIGHT
+    end
+
+    if vehicleKills > 0 then
+        local textX = TEXT_WITH_ICON_X
+        if not drawIcon(self, "UZIR_Vehicle", ICON_X, innerY - 2) then
+            textX = 6
+        end
+        self:drawText(string.format("%04d", vehicleKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
+        innerY = innerY + ROW_HEIGHT
+    end
+
+    cursorY = cursorY + block1Height + BLOCK_GAP
+
+    -- ================== Prioridade 2: Hora e Data ==================
+    if showLive then
+        drawBlockFrame(self, cursorY, block2Height)
+        innerY = cursorY + BLOCK_PADDING
+
+        self:drawText("Hora e Data", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        innerY = innerY + ROW_HEIGHT
+
+        for i, line in ipairs(liveLines) do
+            local x2 = 10 + (i - 1) * LIVE_INDENT_STEP
+            self:drawText(line, x2, innerY, 1, 1, 1, 1, UIFont.Medium)
+            innerY = innerY + ROW_HEIGHT
+        end
+
+        cursorY = cursorY + block2Height + BLOCK_GAP
+    end
+
+    -- ================== Prioridade 3: Nutricao ==================
+    if showCharInfo then
+        drawBlockFrame(self, cursorY, block3Height)
+        innerY = cursorY + BLOCK_PADDING
+
+        self:drawText("Nutricao", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        innerY = innerY + ROW_HEIGHT
+
+        local weightLine = UZIR.Tracker.getWeightLine(player)
+        self:drawText(weightLine, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+
+        local indicator = UZIR.Tracker.getWeightIndicator(player)
+        local okWidth, textWidth = pcall(function()
+            return getTextManager():MeasureStringX(UIFont.Medium, weightLine)
+        end)
+        local indicatorX = 10 + (okWidth and textWidth or 90) + 6
+        local WEIGHT_ICON_SIZE = 22
+        if not drawIcon(self, indicator.icon, indicatorX, innerY - 3, WEIGHT_ICON_SIZE) then
+            self:drawText("*", indicatorX, innerY, indicator.r, indicator.g, indicator.b, 1, UIFont.Medium)
+        end
+        innerY = innerY + ROW_HEIGHT
+
+        if hovering then
+            local status = UZIR.Tracker.getWeightStatus(player)
+            self:drawText(status.text, 10, innerY, status.r, status.g, status.b, 1, UIFont.Small)
+            innerY = innerY + ROW_HEIGHT
+        end
+
+        cursorY = cursorY + block3Height + BLOCK_GAP
+    end
+
+    -- ================== Prioridade 4: Clima/Estacao ==================
+    if showGameInfo then
+        drawBlockFrame(self, cursorY, block4Height)
+        innerY = cursorY + BLOCK_PADDING
+
+        self:drawText("Clima/Estacao", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        innerY = innerY + ROW_HEIGHT
+
+        local season, currentMonth, startMonth, endMonth = UZIR.Tracker.getSeasonInfo()
+        self:drawText(season .. "-Month " .. currentMonth, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+        innerY = innerY + ROW_HEIGHT
+
+        if hovering then
+            local durationLine = season .. " Duration Month " .. startMonth .. " to Month " .. endMonth
+            self:drawText(durationLine, 10, innerY, 1, 1, 1, 1, UIFont.Small)
+            innerY = innerY + ROW_HEIGHT
+        end
+
+        cursorY = cursorY + block4Height + BLOCK_GAP
+    end
+end
+
+-- ================== Criacao da instancia global ==================
+
+local function createHUD()
+    if UZIR.hudInstance then return end
+
+    -- Comeca sempre no canto 1 (superior esquerdo) se ainda nao existe
+    -- preferencia salva - loadCornerIndex ja retorna 1 como padrao.
+    local cornerIndex = loadCornerIndex()
+    local initialHeight = CONTENT_START_Y + (BLOCK_PADDING * 2 + ROW_HEIGHT) + BLOCK_GAP + BOTTOM_PADDING
+    local x, y = computeCornerPosition(cornerIndex, PANEL_WIDTH, initialHeight)
+
+    local hud = UZIR_HUD:new(x, y, PANEL_WIDTH, initialHeight)
+    hud:initialise()
+    hud:addToUIManager()
+
+    UZIR.hudInstance = hud
+end
+
+Events.OnGameStart.Add(createHUD)

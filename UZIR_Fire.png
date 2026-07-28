@@ -1,93 +1,559 @@
 -- Este APP e idealizado por oQuasi e Claude desde 20072026 - Nao permitimos a copia. Divirta-se! Todos os Direitos Reservados
 --
--- UZIR_Util.lua
+-- UZIR_Tracker.lua
+-- UZIR (Ultimate Zombie Interconnected Ranking) / apelido "UZI"
 --
--- Funcoes pequenas e reutilizadas por mais de um arquivo do UZIR. Fica em
--- "shared" (carrega antes de "client") justamente para garantir que ja
--- existe quando UZIR_Tracker.lua e UZIR_HUD.lua rodarem.
+-- Camada de DADOS do mod: le, guarda e classifica o progresso do
+-- personagem. Nenhum arquivo de UI (HUD, SleepReport) deveria acessar
+-- player:getModData() diretamente - sempre atraves das funcoes publicas
+-- listadas abaixo. Isso mantem um unico lugar responsavel por gravar
+-- cada campo, o que facilita auditar o mod no futuro.
 --
--- ================================================================
--- MODELO DE SEGURANCA DO UZIR - LEIA ANTES DE MEXER NOS OUTROS ARQUIVOS
--- ================================================================
--- O UZIR guarda todos os dados no ModData do proprio save (arquivo local
--- do jogador). Isso significa, sem meio-termo, que:
+-- IMPORTANTE - leia o bloco de seguranca em UZIR_Util.lua antes de
+-- adicionar novas funcoes publicas aqui. Regra geral: se a funcao GRAVA
+-- dado, prefira deixar "local" (privada deste arquivo) a menos que outro
+-- arquivo do mod realmente precise chama-la de fora.
 --
---   1. Qualquer pessoa com acesso ao save pode editar esses numeros na
---      mao (editor de save, ferramentas externas, etc).
---   2. Qualquer OUTRO mod carregado junto (incluindo "cheat menus") pode
---      chamar as funcoes publicas do UZIR diretamente, ja que "UZIR" e
---      uma tabela global comum a todos os mods no mesmo processo Lua.
---   3. O proprio modo debug/cheat nativo do jogo pode gerar kills e
---      progresso que nao refletem uma partida "limpa".
---
--- NENHUMA dessas coisas pode ser impedida de verdade por um mod Lua
--- client-side. Um "checksum" ou "assinatura" caseira NAO resolveria
--- isso - o codigo e aberto, entao dava pra recalcular o checksum depois
--- de editar os valores a mao. Isso seria seguranca de fachada, entao
--- deliberadamente NAO implementamos nada do tipo.
---
--- O que este mod faz, de forma honesta, para reduzir o problema:
---   - Expoe o MINIMO possivel de funcoes que alteram dados (a maioria
---     das funcoes do Tracker que gravam informacao sao "local", nao
---     acessiveis de fora do arquivo).
---   - Sanitiza numeros lidos do ModData (nunca confia cegamente que um
---     valor salvo e um numero valido e nao-negativo).
---   - Marca a sessao quando o modo debug/cheat do jogo e detectado
---     (UZIR.Util.isDebugActive), do mesmo jeito que o proprio jogo ja
---     desativa conquistas quando isso acontece.
---
--- A VALIDACAO DE VERDADE (a que realmente impede trapaca) só pode
--- acontecer no futuro, do lado do SERVIDOR do site de ranking: checagem
--- de plausibilidade (kills por hora, tempo de jogo vs. progresso
--- reportado, etc). Isso fica documentado aqui para quando chegarmos
--- nessa fase do projeto.
--- ================================================================
+-- API PUBLICA deste arquivo (Tracker.*), pensada para ser so LEITURA
+-- exceto snapshotAndResetToday (ver comentario dela mais abaixo):
+--   getPlayer()                    - jogador local atual
+--   getKillCount(player)           - total oficial de kills (nativo do jogo)
+--   getFireKills(player)           - total de mortes por fogo (todo o save)
+--   getVehicleKills(player)        - total de atropelamentos (todo o save)
+--   getInvalidTotal(player)        - fogo + atropelamento somados
+--   getHoursAlive(player)          - horas de vida do personagem atual
+--   getLiveLines(player)           - linhas Hours/Days/Week/Month/Year ja desbloqueadas
+--   getKillCountLine(player)       - string "zKILL 0000" pronta pro HUD
+--   getWeightLine(player)          - string "Weight-85.5" pronta pro HUD
+--   getWeightStatus(player)        - {text, r, g, b} High Weight/Regular/Under Weight
+--   getWeightIndicator(player)     - {symbol, r, g, b} seta/circulo de tendencia de peso
+--   getSeasonInfo()                - estacao atual, mes atual, mes inicio/fim da estacao
+--   getTodayValidBreakdown(player) - kills validos acumulados HOJE (ao vivo)
+--   getDailyHistory(player)        - snapshots de dias passados (sleep report)
+--   snapshotAndResetToday(player)  - ver aviso na propria funcao
 
 UZIR = UZIR or {}
-UZIR.Util = UZIR.Util or {}
+UZIR.Tracker = UZIR.Tracker or {}
 
-local Util = UZIR.Util
+local Tracker = UZIR.Tracker
+local Util = UZIR.Util -- definido em UZIR_Util.lua (shared, carrega antes)
 
--- Relogio em milissegundos, usado para animacoes e janelas de tempo
--- (ex: "esse zumbi foi atingido por um veiculo ha quanto tempo?").
--- getTimestampMs() e a funcao nativa esperada; se por algum motivo nao
--- existir na build atual, caimos para os.clock() (menos preciso, mas
--- evita que o mod quebre).
-function Util.nowMs()
-    local ok, ts = pcall(function() return getTimestampMs() end)
-    if ok and ts then return ts end
-    return os.clock() * 1000
+-- Janela de tempo para aceitar uma causa de morte como valida depois de
+-- um evento (atropelamento ou golpe de arma). Sem essa janela, um
+-- zumbi que morresse bem depois por outro motivo (armadilha, outro mod,
+-- reaproveitamento da instancia) poderia ser creditado errado.
+local VEHICLE_HIT_WINDOW_MS = 3000
+local WEAPON_HIT_WINDOW_MS = 5000
+
+-- ================== Jogador local ==================
+
+-- Retorna o jogador local (0 = primeiro jogador da tela, cobre single
+-- player e a maioria dos casos de splitscreen para o slot principal).
+-- LIMITACAO CONHECIDA: em multiplayer com mais de um jogador local, ou
+-- ao adaptar este mod para rastrear outros jogadores, este indice fixo
+-- precisara ser revisto.
+function Tracker.getPlayer()
+    return getSpecificPlayer(0)
 end
 
--- Converte qualquer valor lido do ModData num inteiro nao-negativo
--- seguro para exibir. Protege contra:
---   - ModData corrompido ou editado a mao com lixo (string, nil, negativo)
---   - Bugs futuros que gravem algo inesperado no lugar de um numero
--- Isso NAO detecta/impede valores editados para CIMA (ex: alguem setar
--- fireKills = 99999 continua sendo um numero "valido" do ponto de vista
--- desta funcao) - crucialmente, essa e uma limitacao que so validacao no
--- servidor consegue cobrir. Isto aqui e so higiene de dados.
-function Util.sanitizeCount(value)
-    if type(value) ~= "number" then return 0 end
-    if value ~= value then return 0 end -- NaN nunca e igual a si mesmo
-    if value < 0 then return 0 end
-    return math.floor(value)
-end
-
--- Tenta detectar se o modo debug/cheat do jogo esta (ou esteve) ativo.
--- ATENCAO: assim como outras chamadas experimentais deste mod, o nome
--- exato da funcao nativa pode variar entre builds; tentamos algumas
--- possibilidades conhecidas em sequencia. Se nenhuma existir, assumimos
--- "nao ativo" (nao bloqueia nada, so deixa de marcar a sessao).
-function Util.isDebugActive()
-    local candidates = {
-        function() return isDebugEnabled() end,
-        function() return getDebug() end,
-        function() return getCore():getDebug() end,
-    }
-    for _, fn in ipairs(candidates) do
-        local ok, result = pcall(fn)
-        if ok and result then return true end
+-- Garante que o personagem tem a estrutura de dados inicializada.
+-- Privada: so o proprio arquivo precisa chamar isso (hook no fim do arquivo).
+local function initPlayerData(player)
+    if not player then return end
+    local modData = player:getModData()
+    if modData.UZIR_hoursAlive == nil then
+        modData.UZIR_hoursAlive = 0
     end
-    return false
 end
+
+-- Chamado a cada hora de jogo (Events.EveryHours). Incrementa o
+-- contador de horas vivas (fallback caso o jogo nao exponha um getter
+-- nativo equivalente) e aproveita para atualizar a marca de "debug
+-- usado neste save", ja que checar isso a cada hora e barato o
+-- suficiente e nao precisa ser por frame.
+local function onEveryHour()
+    local player = Tracker.getPlayer()
+    if not player then return end
+
+    if Util.isDebugActive() then
+        player:getModData().UZIR_debugEverActive = true
+    end
+
+    if player:isDead() then return end
+
+    local modData = player:getModData()
+    modData.UZIR_hoursAlive = (modData.UZIR_hoursAlive or 0) + 1
+end
+
+-- Numero de zumbis mortos pelo personagem (KillCount oficial do jogo).
+-- Tenta usar o getter nativo do jogo (ja usado por outros mods de
+-- ranking); se por algum motivo nao existir na build atual, retorna 0
+-- em vez de crashar. O resultado sempre passa por sanitizeCount.
+function Tracker.getKillCount(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+
+    local ok, kills = pcall(function() return player:getZombieKills() end)
+    if ok then
+        return Util.sanitizeCount(kills)
+    end
+    return 0
+end
+
+-- Se este save ja teve o modo debug/cheat do jogo ativo em algum
+-- momento. Nao bloqueia nada por si so - serve como contexto para uma
+-- futura revisao manual ou para o backend do site de ranking decidir o
+-- que fazer com esse resultado (o mesmo principio que o proprio jogo ja
+-- usa para desativar conquistas).
+function Tracker.wasDebugEverActive(player)
+    player = player or Tracker.getPlayer()
+    if not player then return false end
+    return player:getModData().UZIR_debugEverActive == true
+end
+
+-- ================== Mortes por fogo e por atropelamento ==================
+-- O contador nativo do jogo (getKillCount, acima) so soma mortes causadas
+-- diretamente por golpe de arma do jogador. Zumbis mortos por fogo ou
+-- atropelamento NAO entram nesse numero em lugar nenhum nativamente, entao
+-- rastreamos isso por conta propria, separado do zKILL oficial.
+
+function Tracker.getFireKills(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+    return Util.sanitizeCount(player:getModData().UZIR_fireKills)
+end
+
+function Tracker.getVehicleKills(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+    return Util.sanitizeCount(player:getModData().UZIR_vehicleKills)
+end
+
+-- TOTAL Points do lado "inValid" = fogo + atropelamento somados (todo o save).
+function Tracker.getInvalidTotal(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+    return Tracker.getFireKills(player) + Tracker.getVehicleKills(player)
+end
+
+-- Marca, na propria instancia do zumbi, que ele acabou de ser atingido por
+-- um veiculo, com o horario do toque. Usado em onZombieDead para decidir a
+-- causa da morte. Privada: ninguem de fora precisa chamar isso.
+--
+-- ATENCAO: nao existe um evento oficial "zumbi atropelado" no Lua do jogo;
+-- isso e uma aproximacao via OnObjectCollide e pode nao pegar 100% dos casos
+-- (ou raramente marcar um caso que nao era realmente atropelamento).
+local function onObjectCollide(object, collided)
+    local ok, isVehicle = pcall(function() return instanceof(object, "BaseVehicle") end)
+    if not (ok and isVehicle) then return end
+
+    local ok2, isZombie = pcall(function() return instanceof(collided, "IsoZombie") end)
+    if not (ok2 and isZombie) then return end
+
+    pcall(function()
+        collided:getModData().UZIR_vehicleHitTime = Util.nowMs()
+    end)
+end
+
+-- ================== Rastreamento de arma para "Valid Points" ==================
+-- Para o relatorio de sono, precisamos saber nao so QUANTOS zumbis
+-- morreram oficialmente, mas COM QUE ARMA. Guardamos, na propria
+-- instancia do zumbi, qual foi a ultima arma do jogador que o atingiu E
+-- QUANDO, para so confiar nisso se a morte aconteceu logo em seguida
+-- (ver WEAPON_HIT_WINDOW_MS).
+
+-- Classifica a arma em categoria ampla. ATENCAO: usamos weapon:isRanged()
+-- para separar "Fire Gun" de "Melee" - isso tambem classificaria arcos
+-- como "Fire Gun", entao pode precisar de ajuste fino apos teste real.
+local function classifyWeapon(weapon)
+    local ok, ranged = pcall(function() return weapon:isRanged() end)
+    if ok and ranged then
+        return "Fire Gun"
+    end
+    return "Melee"
+end
+
+-- Privada: so o proprio arquivo precisa chamar isso (hook no fim do arquivo).
+local function onHitZombie(zombie, attacker, bodyPart, weapon)
+    local player = Tracker.getPlayer()
+    if not player or attacker ~= player or not weapon then return end
+
+    pcall(function()
+        local zModData = zombie:getModData()
+        zModData.UZIR_lastWeaponName = weapon:getDisplayName() or "Unknown"
+        zModData.UZIR_lastWeaponCategory = classifyWeapon(weapon)
+        zModData.UZIR_lastWeaponHitTime = Util.nowMs()
+    end)
+end
+
+-- Registra um kill "oficial" no acumulado do dia (ao vivo). Privada:
+-- so onZombieDead (deste mesmo arquivo) deveria chamar isso. Manter
+-- privada reduz a chance de outro script injetar kills falsos chamando
+-- essa funcao diretamente de fora.
+--
+-- Estrutura guardada em player:getModData().UZIR_todayValid:
+--   { order = {"Melee", "Fire Gun", ...},
+--     categories = { Melee = { weapons = { {name="Base Ball Bat", count=2}, ... } }, ... } }
+local function recordValidKill(player, category, weaponName)
+    if not player or not category or not weaponName then return end
+    local modData = player:getModData()
+    if not modData.UZIR_todayValid then
+        modData.UZIR_todayValid = {order = {}, categories = {}}
+    end
+    local today = modData.UZIR_todayValid
+
+    local cat = today.categories[category]
+    if not cat then
+        cat = {weapons = {}}
+        today.categories[category] = cat
+        table.insert(today.order, category)
+    end
+
+    local entry = nil
+    for _, w in ipairs(cat.weapons) do
+        if w.name == weaponName then
+            entry = w
+            break
+        end
+    end
+    if not entry then
+        entry = {name = weaponName, count = 0}
+        table.insert(cat.weapons, entry)
+    end
+    entry.count = entry.count + 1
+end
+
+-- Kills validos acumulados desde o ultimo sono (ainda "ao vivo", muda a
+-- cada kill). O Sleep Report NAO le isso diretamente para exibir - ele
+-- le o snapshot congelado em getDailyHistory. Esta funcao fica
+-- disponivel para outros usos futuros (ex: um widget de HUD "hoje").
+function Tracker.getTodayValidBreakdown(player)
+    player = player or Tracker.getPlayer()
+    if not player then return {order = {}, categories = {}} end
+    return player:getModData().UZIR_todayValid or {order = {}, categories = {}}
+end
+
+-- Copia profunda da tabela de breakdown, para o snapshot nao ficar "vivo"
+-- (se copiassemos so a referencia, o reset logo em seguida apagaria o
+-- snapshot tambem, ja que em Lua tabelas sao referencias).
+local function deepCopyBreakdown(breakdown)
+    local copy = {order = {}, categories = {}}
+    for i, catName in ipairs(breakdown.order) do
+        copy.order[i] = catName
+    end
+    for catName, cat in pairs(breakdown.categories) do
+        local weapons = {}
+        for i, w in ipairs(cat.weapons) do
+            weapons[i] = {name = w.name, count = Util.sanitizeCount(w.count)}
+        end
+        copy.categories[catName] = {weapons = weapons}
+    end
+    return copy
+end
+
+-- Chamado quando o personagem DORME. Tira um "retrato" do que foi
+-- acumulado desde o ultimo sono e guarda no historico; so depois zera o
+-- contador "ao vivo" para comecar a acumular o proximo periodo.
+--
+-- Esta funcao PRECISA continuar publica porque UZIR_SleepReport.lua (um
+-- arquivo diferente) chama ela na transicao de dormir. E a unica funcao
+-- de escrita deste arquivo exposta publicamente por necessidade real de
+-- uso externo.
+function Tracker.snapshotAndResetToday(player)
+    if not player then return end
+    local modData = player:getModData()
+
+    local today = modData.UZIR_todayValid or {order = {}, categories = {}}
+    local snapshot = deepCopyBreakdown(today)
+
+    local fireToday = Util.sanitizeCount(modData.UZIR_fireKillsToday)
+    local vehicleToday = Util.sanitizeCount(modData.UZIR_vehicleKillsToday)
+
+    modData.UZIR_dayCounter = (modData.UZIR_dayCounter or 0) + 1
+    modData.UZIR_dailyHistory = modData.UZIR_dailyHistory or {}
+    table.insert(modData.UZIR_dailyHistory, {
+        dayNumber = modData.UZIR_dayCounter,
+        breakdown = snapshot,
+        invalidFire = fireToday,
+        invalidVehicle = vehicleToday,
+    })
+
+    modData.UZIR_todayValid = {order = {}, categories = {}}
+    modData.UZIR_fireKillsToday = 0
+    modData.UZIR_vehicleKillsToday = 0
+end
+
+-- Historico de dias (cada entrada = um periodo entre dois sonos).
+function Tracker.getDailyHistory(player)
+    player = player or Tracker.getPlayer()
+    if not player then return {} end
+    return player:getModData().UZIR_dailyHistory or {}
+end
+
+-- Ao zumbi morrer, decide a causa (fogo, veiculo, ou golpe direto do
+-- jogador) e credita o tipo certo de ponto. Privada: so este arquivo
+-- precisa reagir a esse evento.
+--
+-- Em todos os ramos, limpamos os campos temporarios gravados na
+-- instancia do zumbi depois de usa-los. Isso e importante porque o
+-- jogo RECICLA instancias de IsoZombie (object pooling) - sem essa
+-- limpeza, um zumbi reaproveitado poderia "herdar" informacao de arma
+-- de um zumbi completamente diferente morto muito antes.
+local function onZombieDead(zombie)
+    local player = Tracker.getPlayer()
+    if not player then return end
+
+    local zModData = zombie:getModData()
+
+    local okFire, onFire = pcall(function() return zombie:isOnFire() end)
+    if okFire and onFire then
+        local modData = player:getModData()
+        modData.UZIR_fireKills = (modData.UZIR_fireKills or 0) + 1
+        modData.UZIR_fireKillsToday = (modData.UZIR_fireKillsToday or 0) + 1
+        zModData.UZIR_vehicleHitTime = nil
+        zModData.UZIR_lastWeaponName = nil
+        zModData.UZIR_lastWeaponCategory = nil
+        zModData.UZIR_lastWeaponHitTime = nil
+        return
+    end
+
+    local hitTime = zModData.UZIR_vehicleHitTime
+    if hitTime and (Util.nowMs() - hitTime) <= VEHICLE_HIT_WINDOW_MS then
+        local modData = player:getModData()
+        modData.UZIR_vehicleKills = (modData.UZIR_vehicleKills or 0) + 1
+        modData.UZIR_vehicleKillsToday = (modData.UZIR_vehicleKillsToday or 0) + 1
+        zModData.UZIR_vehicleHitTime = nil
+        zModData.UZIR_lastWeaponName = nil
+        zModData.UZIR_lastWeaponCategory = nil
+        zModData.UZIR_lastWeaponHitTime = nil
+        return
+    end
+
+    -- Kill "oficial" (Valid Points): so credita a arma se o golpe foi
+    -- recente o suficiente (evita atribuir um golpe antigo/obsoleto a
+    -- uma morte causada por outra coisa).
+    local wName = zModData.UZIR_lastWeaponName
+    local wCat = zModData.UZIR_lastWeaponCategory
+    local wTime = zModData.UZIR_lastWeaponHitTime
+    if wName and wCat and wTime and (Util.nowMs() - wTime) <= WEAPON_HIT_WINDOW_MS then
+        recordValidKill(player, wCat, wName)
+    end
+
+    zModData.UZIR_vehicleHitTime = nil
+    zModData.UZIR_lastWeaponName = nil
+    zModData.UZIR_lastWeaponCategory = nil
+    zModData.UZIR_lastWeaponHitTime = nil
+end
+
+-- ================== Tempo de vida (Live: h/D/W/M/Y) ==================
+
+-- Horas totais de vida do personagem atual. Preferimos o getter nativo
+-- (se existir e retornar algo > 0); caso contrario usamos nosso
+-- contador manual (EveryHours) guardado no ModData.
+function Tracker.getHoursAlive(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+
+    local ok, hours = pcall(function() return player:getHoursSurvived() end)
+    if ok and hours and hours > 0 then
+        return Util.sanitizeCount(hours)
+    end
+
+    return Util.sanitizeCount(player:getModData().UZIR_hoursAlive)
+end
+
+-- Converte um total de horas em horas/dias/semanas/meses/anos restantes
+-- (aproximacao: mes = 30 dias, ano = 365 dias).
+local function splitHoursIntoUnits(totalHours)
+    totalHours = totalHours or 0
+
+    local years = math.floor(totalHours / (24 * 365))
+    local rest = totalHours - years * 24 * 365
+
+    local months = math.floor(rest / (24 * 30))
+    rest = rest - months * 24 * 30
+
+    local weeks = math.floor(rest / (24 * 7))
+    rest = rest - weeks * 24 * 7
+
+    local days = math.floor(rest / 24)
+    rest = rest - days * 24
+
+    local hours = math.floor(rest)
+
+    return hours, days, weeks, months, years
+end
+
+-- Strings ja formatadas no padrao pedido: "zKILL 0000"
+function Tracker.getKillCountLine(player)
+    return string.format("zKILL %04d", Tracker.getKillCount(player))
+end
+
+-- Linhas do bloco "Live", desbloqueadas progressivamente:
+--   Hours aparece desde o inicio (0-23)
+--   Days  aparece só depois de completar 24h (1 dia)
+--   Week  aparece só depois de completar 7 dias
+--   Month aparece só depois de completar 30 dias
+--   Year  aparece só depois de completar 365 dias
+-- Cada uma nasce numa linha nova, dando a impressao de avanco/conquista.
+-- Os rotulos foram renomeados a pedido dos jogadores que testaram o mod
+-- (antes eram so "h"/"D"/"W"/"M"/"Y"). Hours/Days/Week/Month usam no
+-- minimo 2 casas (crescem sozinhas se passarem de 99); Year usa so 1
+-- casa minima, tambem crescendo conforme necessario.
+function Tracker.getLiveLines(player)
+    local totalHours = Tracker.getHoursAlive(player)
+    local h, d, w, m, y = splitHoursIntoUnits(totalHours)
+
+    local lines = {string.format("Hours-%02d", h)}
+
+    if totalHours >= 24 then
+        table.insert(lines, string.format("Days-%02d", d))
+    end
+    if totalHours >= 24 * 7 then
+        table.insert(lines, string.format("Week-%02d", w))
+    end
+    if totalHours >= 24 * 30 then
+        table.insert(lines, string.format("Month-%02d", m))
+    end
+    if totalHours >= 24 * 365 then
+        table.insert(lines, string.format("Year-%d", y))
+    end
+
+    return lines
+end
+
+-- ================== Char Info: peso do personagem ==================
+
+-- Peso atual do personagem, no formato "Weight-85.5" (uma casa decimal).
+--
+-- ATENCAO (bug corrigido): a primeira tentativa usava player:getWeight()
+-- direto, mas esse metodo pertence a hierarquia de IsoMovingObject e
+-- retorna um valor de fisica/colisao (viemos a ver "0.3" na tela, sem
+-- nenhuma relacao com o peso corporal de verdade). O peso que aparece
+-- no painel de Info do personagem ("Peso 77") vem do sistema de
+-- Nutricao, entao usamos player:getNutrition():getWeight() agora.
+function Tracker.getWeightLine(player)
+    player = player or Tracker.getPlayer()
+    if not player then return "Weight-00.0" end
+
+    local ok, weight = pcall(function() return player:getNutrition():getWeight() end)
+    if not (ok and type(weight) == "number") then
+        return "Weight-00.0"
+    end
+
+    return string.format("Weight-%.1f", weight)
+end
+
+-- Status do peso, mostrado so ao passar o mouse (ver UZIR_HUD.lua):
+--   >= 85kg        -> "High Weight"  (vermelho)
+--   75kg ate 84kg  -> "Regular"      (verde)
+--   <= 74kg        -> "Under Weight" (vermelho)
+-- Faixas definidas a pedido do autor; ajuste aqui se os limites do jogo
+-- mudarem ou se quiser afinar os numeros depois de testar.
+function Tracker.getWeightStatus(player)
+    player = player or Tracker.getPlayer()
+    if not player then return {text = "Regular", r = 0, g = 1, b = 0} end
+
+    local ok, weight = pcall(function() return player:getNutrition():getWeight() end)
+    if not (ok and type(weight) == "number") then
+        return {text = "Regular", r = 0, g = 1, b = 0}
+    end
+
+    if weight >= 85 then
+        return {text = "High Weight", r = 1, g = 0.2, b = 0.2}
+    elseif weight >= 75 then
+        return {text = "Regular", r = 0.2, g = 1, b = 0.2}
+    else
+        return {text = "Under Weight", r = 1, g = 0.2, b = 0.2}
+    end
+end
+
+-- Indicador visual da tendencia de peso (icone + cor), pronto para o
+-- HUD desenhar do lado do "Weight-XX.X":
+--   engordando -> icone de seta para cima, verde
+--   estavel    -> icone de circulo, amarelo
+--   emagrecendo -> icone de seta para baixo, vermelho
+--
+-- HISTORICO: a primeira versao usava caracteres Unicode (bug: a fonte
+-- do jogo nao tem esses glifos, sempre aparecia "?"). A segunda versao
+-- passou a usar icones de textura, mas calculava a tendencia por conta
+-- propria (amostra de peso a cada hora). Esta versao usa a fonte oficial
+-- do jogo: a classe Nutrition ja expoe isIncWeight()/isIncWeightLot()/
+-- isDecWeight(), os MESMOS flags que o proprio painel de Info do
+-- personagem usa para desenhar a seta dele. Mais simples e mais preciso
+-- que reinventar a logica.
+function Tracker.getWeightIndicator(player)
+    player = player or Tracker.getPlayer()
+    if not player then
+        return {icon = "UZIR_WeightStable", r = 1, g = 1, b = 1}
+    end
+
+    local okDec, decreasing = pcall(function() return player:getNutrition():isDecWeight() end)
+    if okDec and decreasing then
+        return {icon = "UZIR_WeightDown", r = 1, g = 1, b = 1}
+    end
+
+    local okInc, increasing = pcall(function() return player:getNutrition():isIncWeight() end)
+    local okIncLot, increasingLot = pcall(function() return player:getNutrition():isIncWeightLot() end)
+    if (okInc and increasing) or (okIncLot and increasingLot) then
+        return {icon = "UZIR_WeightUp", r = 1, g = 1, b = 1}
+    end
+
+    return {icon = "UZIR_WeightStable", r = 1, g = 1, b = 1}
+end
+
+-- ================== Game Info: estacao atual do jogo ==================
+-- ATENCAO: nao existe uma funcao nativa documentada "getSeason()" no
+-- Lua do jogo. Calculamos a estacao a partir do mes atual, seguindo o
+-- padrao de hemisferio norte (o jogo se passa em Knox County, Kentucky):
+--   Winter: Dez, Jan, Fev   Spring: Mar, Abr, Mai
+--   Summer: Jun, Jul, Ago   Autumn: Set, Out, Nov
+
+local MONTH_NAMES = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+}
+
+local SEASON_BY_MONTH = {
+    [1] = "Winter", [2] = "Winter", [3] = "Spring", [4] = "Spring", [5] = "Spring",
+    [6] = "Summer", [7] = "Summer", [8] = "Summer",
+    [9] = "Autumn", [10] = "Autumn", [11] = "Autumn", [12] = "Winter",
+}
+
+local SEASON_RANGE = {
+    Winter = {12, 2},
+    Spring = {3, 5},
+    Summer = {6, 8},
+    Autumn = {9, 11},
+}
+
+-- Mes atual do jogo (1-12). getGameTime():getMonth() retorna 0-11 (base
+-- 0), por isso somamos 1. Se por algum motivo a chamada falhar, caimos
+-- em Janeiro (1) em vez de quebrar.
+local function getCurrentGameMonth()
+    local ok, month0 = pcall(function() return getGameTime():getMonth() end)
+    if ok and type(month0) == "number" then
+        return month0 + 1
+    end
+    return 1
+end
+
+-- Retorna: nome da estacao, mes atual, mes de inicio da estacao, mes de
+-- fim da estacao (todos numeros 1-12).
+function Tracker.getSeasonInfo()
+    local currentMonth = getCurrentGameMonth()
+    local season = SEASON_BY_MONTH[currentMonth] or "Spring"
+    local range = SEASON_RANGE[season]
+    return season, currentMonth, range[1], range[2]
+end
+
+-- ================== Registro dos eventos do jogo ==================
+
+Events.OnCreatePlayer.Add(function(playerIndex, player)
+    initPlayerData(player)
+end)
+
+Events.EveryHours.Add(onEveryHour)
+Events.OnObjectCollide.Add(onObjectCollide)
+Events.OnHitZombie.Add(onHitZombie)
+Events.OnZombieDead.Add(onZombieDead)
