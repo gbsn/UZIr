@@ -11,13 +11,14 @@
 --      esta aberto (era o que causava o bug de resetar a meia-noite).
 --   2. Personagem ACORDA -> tentamos pausar o jogo (o painel atrapalha a
 --      visão do jogo). O painel continua visivel.
---   3. O painel so fecha quando o jogador clica em "Fechar", e ai
+--   3. O painel so fecha quando o jogador clica em "Close", e ai
 --      despausamos o jogo.
---   4. Botoes "< Dia anterior" / "Proximo dia >" navegam pelo historico.
+--   4. Botoes "< Previous Day" / "Next Day >" navegam pelo historico.
 --
--- Dividido em duas colunas internas:
+-- Dividido em TRES colunas internas:
 --   Esquerda: VALID POINTS (mortes "oficiais", contadas pelo jogo)
---   Direita:  inVALID POINTS (fogo/atropelamento)
+--   Meio:     inVALID POINTS (fogo/atropelamento)
+--   Direita:  XP GAINED (XP ganho naquele dia, por pericia)
 --
 -- TAMANHO DINAMICO: largura e altura sao calculadas a cada frame com
 -- base no conteudo real (numero de armas/tipos naquele dia, nomes de
@@ -37,12 +38,12 @@ require "ISUI/ISButton"
 
 UZIR_SleepReport = ISPanel:derive("UZIR_SleepReport")
 
-local MIN_PANEL_WIDTH = 360
+local MIN_PANEL_WIDTH = 520
 local MIN_COLUMN_WIDTH = 160
 
 local INNER_INSET = 6      -- distancia entre a borda externa e a interna
 local CONTENT_INSET = 14   -- distancia entre a borda interna e o texto
-local COLUMN_GAP = 20      -- respiro entre as duas colunas, ao redor da linha divisoria
+local COLUMN_GAP = 20      -- respiro entre as colunas, ao redor de cada linha divisoria
 
 local ROW_HEIGHT = 16
 local SECTION_GAP = 8
@@ -99,7 +100,7 @@ local function buildValidEntries(player, breakdown, dayNumber)
     local entries = {}
 
     local title = "VALID POINTS"
-    if dayNumber then title = title .. "  (Dia " .. dayNumber .. ")" end
+    if dayNumber then title = title .. "  (Day " .. dayNumber .. ")" end
     table.insert(entries, {text = title, font = UIFont.Small, centered = true, gapAfter = ROW_HEIGHT + 4})
 
     local total = player and UZIR.Tracker.getKillCount(player) or 0
@@ -109,7 +110,7 @@ local function buildValidEntries(player, breakdown, dayNumber)
     table.insert(entries, {text = "Type", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.8, 0.8, 0.8}})
 
     if #breakdown.order == 0 then
-        table.insert(entries, {text = "(nenhuma neste dia)", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.6, 0.6, 0.6}})
+        table.insert(entries, {text = "(none this day)", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.6, 0.6, 0.6}})
     end
 
     for _, categoryName in ipairs(breakdown.order) do
@@ -128,7 +129,7 @@ local function buildInvalidEntries(player, fireToday, vehicleToday, dayNumber)
     local entries = {}
 
     local title = "inVALID POINTS"
-    if dayNumber then title = title .. "  (Dia " .. dayNumber .. ")" end
+    if dayNumber then title = title .. "  (Day " .. dayNumber .. ")" end
     table.insert(entries, {text = title, font = UIFont.Small, centered = true, gapAfter = ROW_HEIGHT + 4})
 
     local total = player and UZIR.Tracker.getInvalidTotal(player) or 0
@@ -138,13 +139,42 @@ local function buildInvalidEntries(player, fireToday, vehicleToday, dayNumber)
     table.insert(entries, {text = "Type", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.8, 0.8, 0.8}})
 
     if fireToday <= 0 and vehicleToday <= 0 then
-        table.insert(entries, {text = "(nenhuma neste dia)", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.6, 0.6, 0.6}})
+        table.insert(entries, {text = "(none this day)", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.6, 0.6, 0.6}})
     end
     if fireToday > 0 then
         table.insert(entries, {text = string.format("Fire = %02d Kills", fireToday), font = UIFont.NewSmall, gapAfter = ROW_HEIGHT})
     end
     if vehicleToday > 0 then
         table.insert(entries, {text = string.format("Vehicle = %02d Kills", vehicleToday), font = UIFont.NewSmall, gapAfter = ROW_HEIGHT})
+    end
+
+    return entries
+end
+
+local function buildXPEntries(player, xpBreakdown, dayNumber)
+    local entries = {}
+
+    local title = "XP GAINED"
+    if dayNumber then title = title .. "  (Day " .. dayNumber .. ")" end
+    table.insert(entries, {text = title, font = UIFont.Small, centered = true, gapAfter = ROW_HEIGHT + 4})
+
+    local total = player and UZIR.Tracker.getTotalXP(player) or 0
+    table.insert(entries, {text = string.format("TOTAL XP = %.0f", total), font = UIFont.NewSmall, gapAfter = ROW_HEIGHT + SECTION_GAP})
+
+    table.insert(entries, {text = "Today's XP", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT})
+    table.insert(entries, {text = "Type", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.8, 0.8, 0.8}})
+
+    if #xpBreakdown.order == 0 then
+        table.insert(entries, {text = "(no XP this day)", font = UIFont.NewSmall, gapAfter = ROW_HEIGHT, color = {0.6, 0.6, 0.6}})
+    end
+
+    for _, categoryName in ipairs(xpBreakdown.order) do
+        table.insert(entries, {text = categoryName, font = UIFont.NewSmall, gapAfter = ROW_HEIGHT})
+        local cat = xpBreakdown.categories[categoryName]
+        for _, skill in ipairs(cat.skills) do
+            local line = string.format("%s +%.2f XP", skill.name, skill.amount)
+            table.insert(entries, {text = line, font = UIFont.NewSmall, indent = 8, gapAfter = ROW_HEIGHT})
+        end
     end
 
     return entries
@@ -202,17 +232,17 @@ function UZIR_SleepReport:createChildren()
 
     -- Posicoes iniciais sao provisorias - tudo e reajustado a cada
     -- frame em prerender, conforme o painel muda de tamanho.
-    self.prevButton = ISButton:new(BUTTON_MARGIN, 0, 90, BUTTON_HEIGHT, "< Dia anterior", self, UZIR_SleepReport.onPrevDay)
+    self.prevButton = ISButton:new(BUTTON_MARGIN, 0, 90, BUTTON_HEIGHT, "< Previous Day", self, UZIR_SleepReport.onPrevDay)
     self.prevButton:initialise()
     self.prevButton:instantiate()
     self:addChild(self.prevButton)
 
-    self.nextButton = ISButton:new(BUTTON_MARGIN + 96, 0, 90, BUTTON_HEIGHT, "Proximo dia >", self, UZIR_SleepReport.onNextDay)
+    self.nextButton = ISButton:new(BUTTON_MARGIN + 96, 0, 90, BUTTON_HEIGHT, "Next Day >", self, UZIR_SleepReport.onNextDay)
     self.nextButton:initialise()
     self.nextButton:instantiate()
     self:addChild(self.nextButton)
 
-    self.closeButton = ISButton:new(0, 0, 80, BUTTON_HEIGHT, "Fechar", self, UZIR_SleepReport.onClose)
+    self.closeButton = ISButton:new(0, 0, 80, BUTTON_HEIGHT, "Close", self, UZIR_SleepReport.onClose)
     self.closeButton:initialise()
     self.closeButton:instantiate()
     self:addChild(self.closeButton)
@@ -255,21 +285,24 @@ function UZIR_SleepReport:prerender()
     local dayNumber = entry and entry.dayNumber or nil
     local fireToday = entry and entry.invalidFire or 0
     local vehicleToday = entry and entry.invalidVehicle or 0
+    local xpBreakdown = entry and entry.xpBreakdown or {order = {}, categories = {}}
 
     local validEntries = buildValidEntries(player, breakdown, dayNumber)
     local invalidEntries = buildInvalidEntries(player, fireToday, vehicleToday, dayNumber)
+    local xpEntries = buildXPEntries(player, xpBreakdown, dayNumber)
 
     -- ---- Passo 1: MEDIR (sem desenhar nada ainda) ----
     local validHeight, validWidth = self:renderEntries(validEntries, 0, 0, 999, false)
     local invalidHeight, invalidWidth = self:renderEntries(invalidEntries, 0, 0, 999, false)
+    local xpHeight, xpWidth = self:renderEntries(xpEntries, 0, 0, 999, false)
 
-    local columnWidth = math.max(MIN_COLUMN_WIDTH, validWidth, invalidWidth) + 10
-    local bodyHeight = math.max(validHeight, invalidHeight)
+    local columnWidth = math.max(MIN_COLUMN_WIDTH, validWidth, invalidWidth, xpWidth) + 10
+    local bodyHeight = math.max(validHeight, invalidHeight, xpHeight)
 
     local contentX = INNER_INSET + CONTENT_INSET
     local titleRowHeight = ROW_HEIGHT + 6
 
-    local neededWidth = math.max(MIN_PANEL_WIDTH, (contentX * 2) + (columnWidth * 2) + COLUMN_GAP)
+    local neededWidth = math.max(MIN_PANEL_WIDTH, (contentX * 2) + (columnWidth * 3) + (COLUMN_GAP * 2))
     local neededHeight = (INNER_INSET + CONTENT_INSET) + titleRowHeight + bodyHeight
         + BUTTON_MARGIN + BUTTON_HEIGHT + BUTTON_MARGIN + INNER_INSET
 
@@ -301,11 +334,20 @@ function UZIR_SleepReport:prerender()
     local bodyY = contentY + titleRowHeight
 
     self:drawRect(INNER_INSET + 4, bodyY - 4, w - (INNER_INSET + 4) * 2, 1, 0.35, 1, 1, 1)
-    self:drawRect(w / 2, bodyY, 1, bodyHeight, 0.35, 1, 1, 1)
+
+    -- Posicoes das 3 colunas, com uma linha divisoria vertical no meio
+    -- de cada respiro entre elas.
+    local col1X = contentX
+    local col2X = contentX + columnWidth + COLUMN_GAP
+    local col3X = contentX + (columnWidth + COLUMN_GAP) * 2
+
+    self:drawRect(col2X - COLUMN_GAP / 2, bodyY, 1, bodyHeight, 0.35, 1, 1, 1)
+    self:drawRect(col3X - COLUMN_GAP / 2, bodyY, 1, bodyHeight, 0.35, 1, 1, 1)
 
     -- ---- Passo 2: DESENHAR de verdade, usando as mesmas listas medidas ----
-    self:renderEntries(validEntries, contentX, bodyY, columnWidth, true)
-    self:renderEntries(invalidEntries, (w / 2) + (COLUMN_GAP / 2), bodyY, columnWidth, true)
+    self:renderEntries(validEntries, col1X, bodyY, columnWidth, true)
+    self:renderEntries(invalidEntries, col2X, bodyY, columnWidth, true)
+    self:renderEntries(xpEntries, col3X, bodyY, columnWidth, true)
 
     -- Fileira de botoes de navegacao, ancorada no rodape do painel.
     local buttonY = h - BUTTON_MARGIN - BUTTON_HEIGHT
@@ -363,7 +405,7 @@ local function updateSleepState()
         panel:setVisible(true)
     elseif (not asleep) and wasAsleep then
         -- Acabou de acordar: pausa o jogo, mas mantem o painel aberto ate
-        -- o jogador clicar em "Fechar".
+        -- o jogador clicar em "Close".
         pauseGame()
     end
 

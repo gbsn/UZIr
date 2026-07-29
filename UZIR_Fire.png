@@ -28,6 +28,15 @@
 --   getWeightStatus(player)        - {text, r, g, b} High Weight/Regular/Under Weight
 --   getWeightIndicator(player)     - {symbol, r, g, b} seta/circulo de tendencia de peso
 --   getSeasonInfo()                - estacao atual, mes atual, mes inicio/fim da estacao
+--   getLeagueInfo()                - nome do modo de jogo (League) + se bate com um preset oficial (Valid/inValid)
+--   getGameVersion()               - string da versao do jogo (ex "42.20.0"), ou "Unknown"
+--   getTotalXP(player)             - XP total do personagem (nativo do jogo)
+--   getPerkXP(player, perkName)    - XP de uma pericia especifica
+--   getPerkLevelByName(player, perkName) - nivel atual de uma pericia (0-10)
+--   getLastTrainedSkill(player)    - nome da pericia mais recente a ganhar XP (ou nil)
+--   getSkillLevelProgress(player, perkName) - nivel, XP atual, XP restante ate o proximo nivel
+--   getTodayXPBreakdown(player)    - XP ganho HOJE, por categoria/pericia (ao vivo, usado no Sleep Report)
+--   drainXPEvents()                - eventos de XP recentes, para o HUD montar os flutuantes
 --   getTodayValidBreakdown(player) - kills validos acumulados HOJE (ao vivo)
 --   getDailyHistory(player)        - snapshots de dias passados (sleep report)
 --   snapshotAndResetToday(player)  - ver aviso na propria funcao
@@ -251,6 +260,26 @@ local function deepCopyBreakdown(breakdown)
     return copy
 end
 
+-- Copia profunda do breakdown de XP (mesma razao da deepCopyBreakdown
+-- acima: o snapshot nao pode ficar "vivo" apontando pra mesma tabela
+-- que vai ser zerada em seguida). Definida aqui (nao junto do resto da
+-- logica de XP, mais abaixo no arquivo) porque snapshotAndResetToday
+-- precisa dela e Lua exige que funcoes locais existam antes de usadas.
+local function deepCopyXPBreakdown(breakdown)
+    local copy = {order = {}, categories = {}}
+    for i, catName in ipairs(breakdown.order) do
+        copy.order[i] = catName
+    end
+    for catName, cat in pairs(breakdown.categories) do
+        local skills = {}
+        for i, s in ipairs(cat.skills) do
+            skills[i] = {name = s.name, amount = s.amount}
+        end
+        copy.categories[catName] = {skills = skills}
+    end
+    return copy
+end
+
 -- Chamado quando o personagem DORME. Tira um "retrato" do que foi
 -- acumulado desde o ultimo sono e guarda no historico; so depois zera o
 -- contador "ao vivo" para comecar a acumular o proximo periodo.
@@ -266,6 +295,9 @@ function Tracker.snapshotAndResetToday(player)
     local today = modData.UZIR_todayValid or {order = {}, categories = {}}
     local snapshot = deepCopyBreakdown(today)
 
+    local todayXP = modData.UZIR_todayXP or {order = {}, categories = {}}
+    local xpSnapshot = deepCopyXPBreakdown(todayXP)
+
     local fireToday = Util.sanitizeCount(modData.UZIR_fireKillsToday)
     local vehicleToday = Util.sanitizeCount(modData.UZIR_vehicleKillsToday)
 
@@ -276,11 +308,13 @@ function Tracker.snapshotAndResetToday(player)
         breakdown = snapshot,
         invalidFire = fireToday,
         invalidVehicle = vehicleToday,
+        xpBreakdown = xpSnapshot,
     })
 
     modData.UZIR_todayValid = {order = {}, categories = {}}
     modData.UZIR_fireKillsToday = 0
     modData.UZIR_vehicleKillsToday = 0
+    modData.UZIR_todayXP = {order = {}, categories = {}}
 end
 
 -- Historico de dias (cada entrada = um periodo entre dois sonos).
@@ -422,6 +456,175 @@ function Tracker.getLiveLines(player)
     return lines
 end
 
+-- ================== League: modo de jogo (Valid / inValid) ==================
+-- Compara as configuracoes de sandbox ATUAIS do mundo contra os modos
+-- oficiais do jogo (ver UZIR_Presets.lua) para decidir se o jogador
+-- esta numa "League" oficial sem alteracoes ("Valid") ou num Sandbox
+-- customizado ("inValid").
+--
+-- SEGURANCA: aqui SO LEMOS a tabela global "SandboxVars" (configuracao
+-- atual, somente leitura). NUNCA chamamos getSandboxOptions():loadPresetFile(),
+-- que descobrimos ser uma funcao que APLICA um preset (efeito colateral
+-- perigoso) - usar ela so para comparar mudaria as configuracoes de
+-- verdade do jogador sem querer.
+
+-- Percorre recursivamente e ACUMULA toda diferenca encontrada entre um
+-- valor de preset (a) e o valor correspondente no mundo atual (b), em
+-- vez de so retornar true/false. Isso e o que nos deixa mostrar
+-- exatamente QUAL campo nao bateu, para diagnosticar o problema em vez
+-- de so saber que "algo" diverge.
+local function collectDifferences(path, a, b, diffs)
+    if type(a) ~= type(b) then
+        table.insert(diffs, {path = path, expected = tostring(a), actual = tostring(b)})
+        return
+    end
+    if type(a) == "table" then
+        for k, v in pairs(a) do
+            local childPath = (path == "" and tostring(k)) or (path .. "." .. tostring(k))
+            collectDifferences(childPath, v, b[k], diffs)
+        end
+        return
+    end
+    if a ~= b then
+        table.insert(diffs, {path = path, expected = tostring(a), actual = tostring(b)})
+    end
+end
+
+-- Retorna a lista de diferencas entre um preset e o mundo atual (lista
+-- vazia = bate perfeitamente), ou nil se a comparacao falhou por algum
+-- motivo (ex: SandboxVars ainda nao existe nesse momento).
+-- Campos que NAO representam uma escolha do jogador, entao sao
+-- excluidos da comparacao (senao gerariam falso "inValid" mesmo sem
+-- ninguem ter mexido em nada):
+--   Version              - versao do FORMATO do arquivo de sandbox
+--   WaterShutModifier,
+--   ElecShutModifier,
+--   AlarmDecayModifier   - HIPOTESE (confirmada por teste real: o log
+--     mostrou WaterShutModifier divergindo mesmo no modo Extinction
+--     "de fabrica", sem alteracao nenhuma). Esses "Modifier" parecem
+--     ser o dia-alvo em torno do qual o jogo SORTEIA quando a agua/luz
+--     de fato desligam - ou seja, o valor no preset e so a media usada
+--     pelo sorteio, e o valor real do mundo varia a cada save mesmo
+--     sem o jogador mudar a configuracao.
+local IGNORED_FIELDS = {
+    Version = true,
+    WaterShutModifier = true,
+    ElecShutModifier = true,
+    AlarmDecayModifier = true,
+}
+
+-- Retorna a lista de diferencas entre um preset e o mundo atual (lista
+-- vazia = bate perfeitamente), ou nil se a comparacao falhou por algum
+-- motivo (ex: SandboxVars ainda nao existe nesse momento).
+local function getPresetDifferences(preset)
+    local diffs = {}
+    local ok = pcall(function()
+        for k, v in pairs(preset) do
+            if not IGNORED_FIELDS[k] then
+                collectDifferences(tostring(k), v, SandboxVars[k], diffs)
+            end
+        end
+    end)
+    if not ok then return nil end
+    return diffs
+end
+
+-- Ordem de checagem e nomes de exibicao dos presets catalogados.
+-- FALTAM Survivor e Builder (ver aviso no topo de UZIR_Presets.lua).
+local LEAGUE_PRESETS = {
+    {key = "APOCALYPSE", name = "Apocalypse"},
+    {key = "EXTINCTION", name = "Extinction"},
+    {key = "OUTBREAK", name = "Outbreak"},
+    {key = "RISING", name = "Rising"},
+}
+
+-- Resultado fica em cache (as configuracoes de sandbox sao fixas pela
+-- vida toda do save - nao faz sentido recalcular isso a cada frame).
+local leagueCache = nil
+
+-- Retorna (nomeDaLeague, valido). Se as configuracoes do mundo baterem
+-- EXATAMENTE com um dos presets oficiais catalogados, retorna o nome
+-- dele e "true". Caso contrario, retorna "Custom Sandbox" e "false".
+--
+-- DIAGNOSTICO: se nenhum preset bater EXATAMENTE, escrevemos no log do
+-- jogo (procure por "[UZIR_LEAGUE_DEBUG]" no DebugLog mais recente em
+-- Zomboid/Logs/) quais campos especificamente nao bateram com o preset
+-- mais proximo - assim da pra saber se e um valor desatualizado na
+-- nossa tabela (ver UZIR_Presets.lua) ou uma diferenca real.
+function Tracker.getLeagueInfo()
+    if leagueCache then
+        return leagueCache.name, leagueCache.valid
+    end
+
+    local matchedName = nil
+    local bestName = nil
+    local bestDiffs = nil
+
+    for _, entry in ipairs(LEAGUE_PRESETS) do
+        local preset = UZIR.Presets and UZIR.Presets[entry.key]
+        if preset then
+            local diffs = getPresetDifferences(preset)
+            if diffs then
+                if #diffs == 0 then
+                    matchedName = entry.name
+                    break
+                end
+                if not bestDiffs or #diffs < #bestDiffs then
+                    bestDiffs = diffs
+                    bestName = entry.name
+                end
+            end
+        end
+    end
+
+    local name = matchedName or "Custom Sandbox"
+    local valid = matchedName ~= nil
+
+    if not matchedName and bestDiffs then
+        pcall(function()
+            print("[UZIR_LEAGUE_DEBUG] No exact preset match. Closest: " .. tostring(bestName) .. " with " .. #bestDiffs .. " differing field(s):")
+            for i, d in ipairs(bestDiffs) do
+                if i <= 30 then -- limita para nao floodar o log
+                    print("[UZIR_LEAGUE_DEBUG]   " .. d.path .. " -- preset=" .. d.expected .. " live=" .. d.actual)
+                end
+            end
+        end)
+    end
+
+    leagueCache = {name = name, valid = valid}
+    return name, valid
+end
+
+-- Game version string (ex: "42.20.0"), shown next to Valid/inValid.
+--
+-- ATTENTION: getCore():getVersionNumber() is known to be unreliable in
+-- some builds (confirmed by other mod authors reporting it simply
+-- doesn't work). We try a few candidates in order and cache whichever
+-- one works first; if none work, we show "Unknown" instead of
+-- crashing or showing a blank line.
+local gameVersionCache = nil
+
+function Tracker.getGameVersion()
+    if gameVersionCache then return gameVersionCache end
+
+    local candidates = {
+        function() return getCore():getVersionNumber() end,
+        function() return getCore():getGameVersion() end,
+        function() return tostring(getCore():getVersion()) end,
+    }
+
+    for _, fn in ipairs(candidates) do
+        local ok, result = pcall(fn)
+        if ok and result and tostring(result) ~= "" then
+            gameVersionCache = tostring(result)
+            return gameVersionCache
+        end
+    end
+
+    gameVersionCache = "Unknown"
+    return gameVersionCache
+end
+
 -- ================== Char Info: peso do personagem ==================
 
 -- Peso atual do personagem, no formato "Weight-85.5" (uma casa decimal).
@@ -547,6 +750,321 @@ function Tracker.getSeasonInfo()
     return season, currentMonth, range[1], range[2]
 end
 
+-- ================== XP (QMTR: Quadro de Monitoramento em Tempo Real) ==================
+-- O jogo ja mantem o XP total e por pericia calculado (getXp():getTotalXp()
+-- e getXp():getXP(perk)) - diferente de kills/fogo/veiculo, aqui NAO
+-- precisamos manter nosso proprio total. O que precisamos fazer por
+-- conta propria e:
+--   1. Classificar cada pericia numa categoria ampla (o jogo nao expoe
+--      isso pronto).
+--   2. Registrar CADA evento de ganho de XP (nao so o total), para o
+--      relatorio diario listar "Manutencao +200 XP" etc.
+--   3. Manter uma fila de eventos recentes, para o HUD desenhar os
+--      flutuantes de XP em tempo real (a fila e consumida e limpa a
+--      cada frame pelo HUD, entao NAO fica salva no ModData - e so
+--      um estado de UI transitorio, nao dado de progresso).
+
+-- ATUALIZADO para a B42.20 Stable (lancada em 29/07/2026), que trouxe
+-- "novas pericias" (profissoes como Blacksmith, DIY Expert, Rancher, e
+-- o sistema de criacao de animais). A lista de nomes novos veio do mod
+-- de referencia "OSRS XP Drops Retextured" (seus icones cobrem
+-- praticamente toda pericia do jogo, incluindo as novas do B42).
+-- Pericias fora desta tabela caem em "Other" (ver getPerkCategory) -
+-- nao quebra nada, so fica sem categoria especifica ate catalogarmos.
+local PERK_CATEGORY = {
+    -- Passivas
+    Strength = "Passive", Fitness = "Passive",
+    -- Combate corpo a corpo
+    Blunt = "Combat", SmallBlunt = "Combat", LongBlade = "Combat", SmallBlade = "Combat",
+    Axe = "Combat", Spear = "Combat", Maintenance = "Combat",
+    -- Armas de fogo
+    Aiming = "Firearms", Reloading = "Firearms",
+    -- Agilidade
+    Sprinting = "Agility", Nimble = "Agility", Sneaking = "Agility", Sneak = "Agility",
+    Lightfoot = "Agility", Lockpicking = "Agility",
+    -- Oficios
+    Carpentry = "Crafting", Woodwork = "Crafting", Cooking = "Crafting", Farming = "Crafting",
+    Doctor = "Crafting", Electricity = "Crafting", Mechanics = "Crafting",
+    MetalWelding = "Crafting", Metalworking = "Crafting", Tailoring = "Crafting",
+    Blacksmith = "Crafting", Carving = "Crafting", Cleaning = "Crafting", Efficiency = "Crafting",
+    Glassmaking = "Crafting", Husbandry = "Crafting", Masonry = "Crafting", Pottery = "Crafting",
+    -- Sobrevivencialista
+    Fishing = "Survivalist", Trapping = "Survivalist", Foraging = "Survivalist",
+    Butchering = "Survivalist", Flintknapping = "Survivalist", PlantScavenging = "Survivalist",
+    Scavenging = "Survivalist", Tracking = "Survivalist",
+    -- Veiculos (nova na B42)
+    Driving = "Vehicles",
+    -- Estilo de vida / bem-estar (novas na B42)
+    Dancing = "Lifestyle", Meditation = "Lifestyle", Music = "Lifestyle",
+}
+
+-- Nome de exibicao da pericia.
+--
+-- HISTORICO (bug corrigido): a primeira tentativa tentava ler campos do
+-- proprio objeto Perk recebido no evento (perk.name, perk:getName(),
+-- tostring(perk)) - na pratica, isso voltava vazio/invalido, e o nome
+-- da pericia sumia dos flutuantes de XP. A solucao mais confiavel nao
+-- e tentar EXTRAIR o nome do objeto, e sim COMPARAR o objeto recebido
+-- contra as entradas conhecidas da tabela global "Perks" (a mesma usada
+-- em getPerkXP/getPerkLevelByName) ate achar qual bate - assim nao
+-- dependemos de nenhum campo/metodo incerto do objeto Perk.
+local function getPerkDisplayName(perk)
+    local ok, found = pcall(function()
+        for name, _ in pairs(PERK_CATEGORY) do
+            if Perks[name] == perk then
+                return name
+            end
+        end
+        return nil
+    end)
+    if ok and found then return found end
+
+    -- Fallbacks antigos, mantidos so como ultimo recurso caso a pericia
+    -- ganha XP nao esteja na nossa tabela PERK_CATEGORY (pericia nova
+    -- que ainda nao catalogamos).
+    local ok1, name1 = pcall(function() return perk.name end)
+    if ok1 and type(name1) == "string" and name1 ~= "" then return name1 end
+
+    local ok2, name2 = pcall(function() return perk:getName() end)
+    if ok2 and type(name2) == "string" and name2 ~= "" then return name2 end
+
+    return "Unknown"
+end
+
+local function getPerkCategory(perkName)
+    return PERK_CATEGORY[perkName] or "Other"
+end
+
+-- Fila de eventos de XP recentes, so em memoria (nao persistida). O HUD
+-- consome (drainXPEvents) e agrupa em flutuantes a cada frame.
+local pendingXPEvents = {}
+
+function Tracker.drainXPEvents()
+    local events = pendingXPEvents
+    pendingXPEvents = {}
+    return events
+end
+
+-- Acumula o XP de hoje por categoria/pericia. Mesma estrutura usada para
+-- os kills validos: { order = {...}, categories = { Cat = { skills = { {name, amount}, ... } } } }
+-- Privada: so onAddXP (deste arquivo) deveria chamar isso.
+local function recordXPGain(player, category, skillName, amount)
+    if not player or not category or not skillName then return end
+    local modData = player:getModData()
+    if not modData.UZIR_todayXP then
+        modData.UZIR_todayXP = {order = {}, categories = {}}
+    end
+    local today = modData.UZIR_todayXP
+
+    local cat = today.categories[category]
+    if not cat then
+        cat = {skills = {}}
+        today.categories[category] = cat
+        table.insert(today.order, category)
+    end
+
+    local entry = nil
+    for _, s in ipairs(cat.skills) do
+        if s.name == skillName then
+            entry = s
+            break
+        end
+    end
+    if not entry then
+        entry = {name = skillName, amount = 0}
+        table.insert(cat.skills, entry)
+    end
+    entry.amount = entry.amount + amount
+end
+
+-- Chamado pelo jogo toda vez que o personagem local ganha XP em
+-- qualquer pericia. Privada: so o proprio arquivo precisa reagir a isso.
+local function onAddXP(character, perk, amount)
+    local player = Tracker.getPlayer()
+    if not player or character ~= player then return end
+    if not amount or amount <= 0 then return end
+
+    local skillName = getPerkDisplayName(perk)
+    local category = getPerkCategory(skillName)
+
+    recordXPGain(player, category, skillName, amount)
+
+    -- Guarda qual foi a ULTIMA pericia a ganhar XP, para o bloco QMTR
+    -- mostrar "so ela" (a pedido do autor, no padrao do mod "Show XP
+    -- Gain"). Persistido (nao so em memoria) para sobreviver a troca de
+    -- tela/painel.
+    local modData = player:getModData()
+    modData.UZIR_lastTrainedSkill = skillName
+    modData.UZIR_lastTrainedCategory = category
+
+    table.insert(pendingXPEvents, {
+        skillName = skillName,
+        category = category,
+        amount = amount,
+        timeMs = Util.nowMs(),
+    })
+end
+
+-- XP total do personagem (todas as pericias somadas).
+--
+-- HISTORICO (bug corrigido): a primeira versao so lia getXp():getTotalXp(),
+-- que na pratica voltou 0 o tempo todo mesmo com XP sendo ganho de
+-- verdade (confirmado por comparacao com outro mod rodando em paralelo).
+-- A segunda tentativa usou um contador proprio (UZIR_totalXPTracked),
+-- mas isso so soma XP ganho DEPOIS que esta versao do mod comecou a
+-- rodar - personagens que ja tinham XP acumulado antes ficariam com o
+-- total errado (faltando tudo que já existia).
+--
+-- A solucao final: somamos o XP REAL de cada pericia catalogada
+-- (getXp():getXP(perk), que sabemos funcionar - e a mesma chamada que
+-- ja usamos com sucesso em getPerkXP) direto do jogo, toda vez que
+-- alguem pede o total. Isso sempre reflete o valor verdadeiro atual,
+-- nao importa se o personagem ja tinha XP antes de instalar o mod.
+function Tracker.getTotalXP(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
+
+    local ok, sum = pcall(function()
+        local xpObj = player:getXp()
+        local total = 0
+        for perkName, _ in pairs(PERK_CATEGORY) do
+            local perk = Perks[perkName]
+            if perk then
+                local v = xpObj:getXP(perk)
+                if type(v) == "number" then
+                    total = total + v
+                end
+            end
+        end
+        return total
+    end)
+    if ok and type(sum) == "number" then
+        return sum
+    end
+
+    return 0
+end
+
+-- XP acumulado numa pericia especifica (busca pelo nome, ex: "Woodwork").
+-- Precisa achar o objeto Perks.<nome> correspondente - tentamos indexar
+-- a tabela global "Perks" pelo nome recebido.
+function Tracker.getPerkXP(player, perkName)
+    player = player or Tracker.getPlayer()
+    if not player or not perkName then return 0 end
+
+    local ok, xp = pcall(function()
+        local perk = Perks[perkName]
+        return player:getXp():getXP(perk)
+    end)
+    if ok and type(xp) == "number" then
+        return xp
+    end
+    return 0
+end
+
+-- Nivel atual (0-10) de uma pericia especifica, pelo nome.
+function Tracker.getPerkLevelByName(player, perkName)
+    player = player or Tracker.getPlayer()
+    if not player or not perkName then return 0 end
+
+    local ok, level = pcall(function()
+        local perk = Perks[perkName]
+        return player:getPerkLevel(perk)
+    end)
+    if ok and type(level) == "number" then
+        return level
+    end
+    return 0
+end
+
+-- Nome da ultima pericia a ganhar XP (ou nil se nenhuma ainda nesta
+-- partida). E o que o bloco QMTR usa para decidir qual pericia mostrar.
+function Tracker.getLastTrainedSkill(player)
+    player = player or Tracker.getPlayer()
+    if not player then return nil end
+    return player:getModData().UZIR_lastTrainedSkill
+end
+
+-- Progresso de NIVEL de uma pericia especifica (no padrao do mod de
+-- referencia "Show XP Gain"):
+--   level        - nivel atual (0-10)
+--   currentXP    - XP acumulado DENTRO do nivel atual
+--   nextLevelXP  - XP necessario para completar o nivel atual e subir (nil se ja no nivel 10, o maximo)
+--   remainingXP  - nextLevelXP - currentXP (nil se ja no nivel maximo)
+--
+-- HISTORICO (bug corrigido, duas tentativas anteriores):
+--   1) Usar getXp():getXP(perk) direto como "XP atual" - batia certo
+--      so para pericias no nivel 0 (por coincidencia, ja que nao ha
+--      nivel anterior a descontar). Para pericias ja niveladas, vinha
+--      bem maior que o valor real.
+--   2) Rastrear XP por conta propria (somando os eventos AddXP,
+--      zerando a cada level up) - corrigia o problema acima, mas
+--      comecava sempre do ZERO ao instalar o mod, perdendo qualquer
+--      progresso que a pericia ja tinha antes.
+--
+-- A causa raiz (descoberta comparando com o codigo-fonte do mod de
+-- referencia "OSRS XP Drops Retextured", que faz essa mesma conta
+-- corretamente): getXp():getXP(perk) retorna o XP ACUMULADO DESDE A
+-- CRIACAO DO PERSONAGEM (nunca reseta ao subir de nivel) - nosso valor
+-- lido na tentativa 1 estava CERTO, so faltava subtrair o custo de
+-- cada nivel ja completado. E o custo de cada nivel individualmente
+-- vem de perk:getXp1() ate perk:getXp10() (dez getters, um por nivel -
+-- NAO de getXpForLevel(), que usavamos antes).
+--
+-- BASEADO NO MOD EXEMPLO "OSRS XP Drops Retextured" (funcoes
+-- ISExpBar:cleanExp/getExpCurrent/getExpMax do arquivo ISExpBar.lua):
+function Tracker.getSkillLevelProgress(player, skillName)
+    player = player or Tracker.getPlayer()
+    if not player or not skillName then return 0, 0, nil, nil end
+
+    local ok, level, currentXP, nextLevelXP = pcall(function()
+        local perk = Perks[skillName]
+        local lvl = player:getPerkLevel(perk)
+        local rawXP = player:getXp():getXP(perk)
+
+        -- Custo INDIVIDUAL de cada nivel (nao acumulado) - mesma
+        -- tabela que o mod de referencia monta em ISExpBar:new().
+        local costPerLevel = {
+            perk:getXp1(), perk:getXp2(), perk:getXp3(), perk:getXp4(), perk:getXp5(),
+            perk:getXp6(), perk:getXp7(), perk:getXp8(), perk:getXp9(), perk:getXp10(),
+        }
+
+        -- Mesma logica de ISExpBar:cleanExp(): desconta do XP bruto o
+        -- custo de cada nivel ja completado (1 ate o nivel atual).
+        local withinLevel = rawXP
+        for i = 1, lvl do
+            withinLevel = withinLevel - costPerLevel[i]
+        end
+
+        -- Mesma logica de ISExpBar:getExpMax(): custo do PROXIMO nivel
+        -- e so o valor daquela posicao na tabela, sem subtracao.
+        local nextXP = nil
+        if lvl < 10 then
+            nextXP = costPerLevel[lvl + 1]
+        end
+
+        return lvl, withinLevel, nextXP
+    end)
+
+    if not ok then return 0, 0, nil, nil end
+
+    local remainingXP = nil
+    if nextLevelXP then
+        remainingXP = nextLevelXP - currentXP
+    end
+
+    return level, currentXP, nextLevelXP, remainingXP
+end
+
+-- XP ganho HOJE, por categoria/pericia (ainda "ao vivo", muda a cada
+-- ganho de XP). Assim como getTodayValidBreakdown, o Sleep Report le o
+-- snapshot congelado do historico, nao isto aqui diretamente.
+function Tracker.getTodayXPBreakdown(player)
+    player = player or Tracker.getPlayer()
+    if not player then return {order = {}, categories = {}} end
+    return player:getModData().UZIR_todayXP or {order = {}, categories = {}}
+end
+
 -- ================== Registro dos eventos do jogo ==================
 
 Events.OnCreatePlayer.Add(function(playerIndex, player)
@@ -557,3 +1075,4 @@ Events.EveryHours.Add(onEveryHour)
 Events.OnObjectCollide.Add(onObjectCollide)
 Events.OnHitZombie.Add(onHitZombie)
 Events.OnZombieDead.Add(onZombieDead)
+Events.AddXP.Add(onAddXP)
