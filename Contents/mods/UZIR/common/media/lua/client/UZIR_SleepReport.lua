@@ -398,6 +398,7 @@ local function updateSleepState()
     local wasAsleep = UZIR.sleepReportWasAsleep
 
     if asleep and not wasAsleep then
+        UZIR.Export.onSleepTransition(player)
         -- Acabou de dormir: tira o retrato do dia que passou e mostra o painel.
         UZIR.Tracker.snapshotAndResetToday(player)
         local history = UZIR.Tracker.getDailyHistory(player)

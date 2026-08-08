@@ -91,3 +91,70 @@ function Util.isDebugActive()
     end
     return false
 end
+
+-- ================================================================
+-- CODIFICADOR JSON MINIMO, PROPRIO
+-- ================================================================
+-- Escrito do zero (nao depende de nenhuma biblioteca externa que
+-- possa ou nao estar disponivel na instalacao do jogador) porque
+-- precisamos transformar as tabelas Lua do Tracker em texto JSON para
+-- o Programa Auxiliar conseguir ler. So cobre os tipos que realmente
+-- usamos no formato "Camada 1" (numero, texto, booleano, nulo, lista,
+-- e tabela com chaves texto) - nao e um codificador JSON genérico
+-- para qualquer uso.
+
+local function jsonEscapeString(s)
+    s = tostring(s)
+    s = s:gsub('\\', '\\\\')
+    s = s:gsub('"', '\\"')
+    s = s:gsub('\n', '\\n')
+    s = s:gsub('\r', '\\r')
+    s = s:gsub('\t', '\\t')
+    return s
+end
+
+-- Decide se uma tabela Lua deve virar uma LISTA JSON ([...]) ou um
+-- OBJETO JSON ({...}) - Lua nao distingue os dois nativamente, entao
+-- olhamos se as chaves sao numeros sequenciais comecando em 1.
+local function isArrayLike(t)
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    if count == 0 then return true end -- tabela vazia vira [] por padrao
+    for i = 1, count do
+        if t[i] == nil then return false end
+    end
+    return true
+end
+
+function Util.encodeJSON(value)
+    local valueType = type(value)
+
+    if value == nil then
+        return "null"
+    elseif valueType == "boolean" then
+        return tostring(value)
+    elseif valueType == "number" then
+        if value ~= value then return "0" end -- NaN nao existe em JSON
+        return tostring(value)
+    elseif valueType == "string" then
+        return '"' .. jsonEscapeString(value) .. '"'
+    elseif valueType == "table" then
+        if isArrayLike(value) then
+            local parts = {}
+            for i, v in ipairs(value) do
+                parts[i] = Util.encodeJSON(v)
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        else
+            local parts = {}
+            local i = 0
+            for k, v in pairs(value) do
+                i = i + 1
+                parts[i] = '"' .. jsonEscapeString(k) .. '":' .. Util.encodeJSON(v)
+            end
+            return "{" .. table.concat(parts, ",") .. "}"
+        end
+    end
+
+    return "null" -- tipo nao suportado (function, userdata, etc) - nunca deveria acontecer aqui
+end

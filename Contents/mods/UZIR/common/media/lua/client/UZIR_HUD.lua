@@ -164,6 +164,128 @@ local function toggleBlock(key)
     data[key] = not isBlockVisible(key)
 end
 
+-- ================== Idioma (Portugues/Ingles) ==================
+-- Preferencia de UI (igual blocos ligados/desligados) - NAO e dado de
+-- jogo, entao guardamos aqui mesmo, via ModData proprio.
+-- Padrao: Ingles (a pedido do autor).
+
+local LANGUAGE_OPTIONS = {
+    {key = "en", label = "English"},
+    {key = "pt", label = "Portugues"},
+}
+
+local function getLanguageData()
+    return ModData.getOrCreate("UZIR_HUD_Language")
+end
+
+local function getCurrentLanguage()
+    local data = getLanguageData()
+    return data.current or "en"
+end
+
+local function setLanguage(key)
+    local data = getLanguageData()
+    data.current = key
+end
+
+-- ================== Textos traduzidos (Portugues/Ingles) ==================
+-- Cada chave do bloco corrente e' o TEXTO DE VERDADE mostrado na tela.
+-- Season/Weight guardam so o IDENTIFICADOR interno em ingles no
+-- UZIR_Tracker.lua (ver comentario la) - a traducao pra exibicao
+-- acontece so aqui, na camada de apresentacao, sem mexer no Tracker.
+local STRINGS = {
+    en = {
+        dateTime = "Date & Time",
+        nutrition = "Nutrition",
+        weatherSeason = "Weather/Season",
+        report = "Report",
+        league = "League - ",
+        valid = "Valid - v",
+        invalid = "inValid - v",
+        xpHeaderFmt = "XP  %s Lvl %d",
+        xpOnly = "XP",
+        noXPYet = "(no XP yet)",
+        maxLevel = "MAX LEVEL",
+        toLvlFmt = "-%.2f to Lvl %d",
+        durationFmt = "%s Duration Month %d to Month %d",
+        monthLabelFmt = "%s-Month %d",
+        weightHigh = "High Weight",
+        weightRegular = "Regular",
+        weightLow = "Under Weight",
+        seasonWinter = "Winter",
+        seasonSpring = "Spring",
+        seasonSummer = "Summer",
+        seasonAutumn = "Autumn",
+        langLabel = "Language",
+    },
+    pt = {
+        dateTime = "Data e Hora",
+        nutrition = "Nutricao",
+        weatherSeason = "Clima/Estacao",
+        report = "Relatorio",
+        league = "Liga - ",
+        valid = "Valido - v",
+        invalid = "Invalido - v",
+        xpHeaderFmt = "XP  %s Niv %d",
+        xpOnly = "XP",
+        noXPYet = "(sem XP ainda)",
+        maxLevel = "NIVEL MAXIMO",
+        toLvlFmt = "-%.2f para o Niv %d",
+        durationFmt = "Duracao de %s: Mes %d ate Mes %d",
+        monthLabelFmt = "%s-Mes %d",
+        weightHigh = "Peso Alto",
+        weightRegular = "Regular",
+        weightLow = "Peso Baixo",
+        seasonWinter = "Inverno",
+        seasonSpring = "Primavera",
+        seasonSummer = "Verao",
+        seasonAutumn = "Outono",
+        langLabel = "Idioma",
+    },
+}
+
+-- L() sempre devolve a tabela de textos do idioma ATUAL - chame de novo
+-- toda vez que precisar (nunca guarde o resultado, ele pode mudar a
+-- qualquer momento se o jogador trocar de idioma no menu).
+local function L()
+    return STRINGS[getCurrentLanguage()]
+end
+
+local SEASON_TRANSLATE_KEY = {
+    Winter = "seasonWinter",
+    Spring = "seasonSpring",
+    Summer = "seasonSummer",
+    Autumn = "seasonAutumn",
+}
+
+-- Traduz o NOME da estacao para exibicao - o identificador interno que
+-- vem do Tracker continua sempre em ingles (usado so como chave
+-- tecnica, nunca mostrado direto na tela sem passar por aqui).
+local function translateSeason(seasonEn)
+    local key = SEASON_TRANSLATE_KEY[seasonEn]
+    return key and L()[key] or seasonEn
+end
+
+local WEIGHT_TRANSLATE_KEY = {
+    ["High Weight"] = "weightHigh",
+    ["Regular"] = "weightRegular",
+    ["Under Weight"] = "weightLow",
+}
+
+-- Traduz o texto de status de peso que vem do Tracker (sempre em
+-- ingles) para o idioma atual, sem precisar mexer no Tracker.
+local function translateWeightStatus(textEn)
+    local key = WEIGHT_TRANSLATE_KEY[textEn]
+    return key and L()[key] or textEn
+end
+
+local BLOCK_LABEL_KEYS = {
+    xp = "xpOnly",
+    live = "dateTime",
+    charinfo = "nutrition",
+    gameinfo = "weatherSeason",
+}
+
 -- ================== Posicao (canto da tela) ==================
 -- Guardamos so um indice de canto (1 a 4), nunca mais um x/y livre em
 -- pixels. A posicao real e recalculada a cada frame a partir do canto
@@ -285,6 +407,10 @@ function UZIR_HUD:onToggleBlockClick(key)
     toggleBlock(key)
 end
 
+function UZIR_HUD:onSelectLanguage(key)
+    setLanguage(key)
+end
+
 function UZIR_HUD:onRightMouseDown(x, y)
     local player = UZIR.Tracker.getPlayer()
     local playerNum = 0
@@ -300,7 +426,27 @@ function UZIR_HUD:onRightMouseDown(x, y)
     for _, block in ipairs(TOGGLABLE_BLOCKS) do
         local visible = isBlockVisible(block.key)
         local prefix = visible and "[X] " or "[ ] "
-        context:addOption(prefix .. block.label, self, UZIR_HUD.onToggleBlockClick, block.key)
+        local label = L()[BLOCK_LABEL_KEYS[block.key]] or block.label
+        context:addOption(prefix .. label, self, UZIR_HUD.onToggleBlockClick, block.key)
+    end
+
+    -- ---- Separador + selecao de idioma ----
+    -- NOTA HONESTA: nao confirmamos ainda, testando dentro do jogo, se
+    -- o ISContextMenu do PZ tem um separador nativo documentado nem se
+    -- "notAvailable" e mesmo a propriedade certa para deixar uma opcao
+    -- so-texto (nao clicavel). Isso e a aposta mais segura com o que
+    -- ja sabemos do resto do menu - se aparecer errado/clicavel, e o
+    -- primeiro lugar pra ajustar depois de testar no jogo.
+    local divider = context:addOption("——————————", nil, nil)
+    if divider then divider.notAvailable = true end
+
+    local langLabel = context:addOption(L().langLabel, nil, nil)
+    if langLabel then langLabel.notAvailable = true end
+
+    local currentLang = getCurrentLanguage()
+    for _, lang in ipairs(LANGUAGE_OPTIONS) do
+        local prefix = (currentLang == lang.key) and "[X] " or "[ ] "
+        context:addOption(prefix .. lang.label, self, UZIR_HUD.onSelectLanguage, lang.key)
     end
 
     return true
@@ -501,8 +647,8 @@ function UZIR_HUD:prerender()
     do
         local leagueName, isValid = UZIR.Tracker.getLeagueInfo()
         local gameVersion = UZIR.Tracker.getGameVersion()
-        considerWidth("League - " .. leagueName, UIFont.Small)
-        local statusPrefix = isValid and "Valid - v" or "inValid - v"
+        considerWidth(L().league .. leagueName, UIFont.Small)
+        local statusPrefix = isValid and L().valid or L().invalid
         considerWidth(statusPrefix .. gameVersion, UIFont.Small)
     end
 
@@ -514,12 +660,12 @@ function UZIR_HUD:prerender()
         local lastSkill = UZIR.Tracker.getLastTrainedSkill(player)
         if lastSkill then
             local level, currentXP, nextLevelXP, remainingXP = UZIR.Tracker.getSkillLevelProgress(player, lastSkill)
-            considerWidth(string.format("XP  %s Lvl %d", lastSkill, level), UIFont.Small)
+            considerWidth(string.format(L().xpHeaderFmt, lastSkill, level), UIFont.Small)
             considerWidth(string.format("%.2f XP", currentXP), UIFont.Medium)
             if remainingXP then
-                considerWidth(string.format("-%.2f to Lvl %d", remainingXP, level + 1), UIFont.Small)
+                considerWidth(string.format(L().toLvlFmt, remainingXP, level + 1), UIFont.Small)
             else
-                considerWidth("MAX LEVEL", UIFont.Small)
+                considerWidth(L().maxLevel, UIFont.Small)
             end
         else
             considerWidth("XP", UIFont.Small)
@@ -536,15 +682,15 @@ function UZIR_HUD:prerender()
     if showCharInfo then
         considerWidth(UZIR.Tracker.getWeightLine(player), UIFont.Medium)
         if hovering then
-            considerWidth(UZIR.Tracker.getWeightStatus(player).text, UIFont.Small)
+            considerWidth(translateWeightStatus(UZIR.Tracker.getWeightStatus(player).text), UIFont.Small)
         end
     end
 
     if showGameInfo then
         local season, currentMonth, startMonth, endMonth = UZIR.Tracker.getSeasonInfo()
-        considerWidth(season .. "-Month " .. currentMonth, UIFont.Medium)
+        considerWidth(string.format(L().monthLabelFmt, translateSeason(season), currentMonth), UIFont.Medium)
         if hovering then
-            considerWidth(season .. " Duration Month " .. startMonth .. " to Month " .. endMonth, UIFont.Small)
+            considerWidth(string.format(L().durationFmt, translateSeason(season), startMonth, endMonth), UIFont.Small)
         end
     end
 
@@ -571,6 +717,10 @@ function UZIR_HUD:prerender()
     end
     if self.reportButton then
         self.reportButton:setWidth(self:getWidth() - 12)
+        -- NOTA HONESTA: nao confirmamos se ISButton tem setTitle() nessa
+        -- versao do jogo - protegido com pcall para nunca quebrar o HUD
+        -- caso o metodo nao exista ou tenha outro nome.
+        pcall(function() self.reportButton:setTitle(L().report) end)
     end
 
     ISPanel.prerender(self)
@@ -588,11 +738,11 @@ function UZIR_HUD:prerender()
     -- itself doesn't run every frame).
     local leagueName, isValid = UZIR.Tracker.getLeagueInfo()
     local gameVersion = UZIR.Tracker.getGameVersion()
-    self:drawTextCentre("League - " .. leagueName, self:getWidth() / 2, LEAGUE_Y, 0.7, 0.7, 0.7, 1, UIFont.Small)
+    self:drawTextCentre(L().league .. leagueName, self:getWidth() / 2, LEAGUE_Y, 0.7, 0.7, 0.7, 1, UIFont.Small)
     if isValid then
-        self:drawTextCentre("Valid - v" .. gameVersion, self:getWidth() / 2, STATUS_Y, 0.2, 1, 0.2, 1, UIFont.Small)
+        self:drawTextCentre(L().valid .. gameVersion, self:getWidth() / 2, STATUS_Y, 0.2, 1, 0.2, 1, UIFont.Small)
     else
-        self:drawTextCentre("inValid - v" .. gameVersion, self:getWidth() / 2, STATUS_Y, 1, 0.2, 0.2, 1, UIFont.Small)
+        self:drawTextCentre(L().invalid .. gameVersion, self:getWidth() / 2, STATUS_Y, 1, 0.2, 0.2, 1, UIFont.Small)
     end
 
     if not player then return end
@@ -646,7 +796,7 @@ function UZIR_HUD:prerender()
             local level, currentXP, nextLevelXP, remainingXP = UZIR.Tracker.getSkillLevelProgress(player, lastSkill)
 
             -- Cabecalho "XP" + nome da ultima pericia treinada + nivel atual.
-            local headerText = string.format("XP  %s Lvl %d", lastSkill, level)
+            local headerText = string.format(L().xpHeaderFmt, lastSkill, level)
             self:drawText(headerText, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
 
@@ -655,18 +805,18 @@ function UZIR_HUD:prerender()
             self:drawXPFloaters(innerY)
             innerY = innerY + ROW_HEIGHT
 
-            -- Quanto falta pro proximo nivel, ou "MAX LEVEL" se ja no nivel 10.
+            -- Quanto falta pro proximo nivel, ou o texto de nivel maximo se ja no 10.
             if remainingXP then
-                self:drawText(string.format("-%.2f to Lvl %d", remainingXP, level + 1), 10, innerY, 0.8, 0.8, 0.8, 1, UIFont.Small)
+                self:drawText(string.format(L().toLvlFmt, remainingXP, level + 1), 10, innerY, 0.8, 0.8, 0.8, 1, UIFont.Small)
             else
-                self:drawText("MAX LEVEL", 10, innerY, 0.2, 1, 0.2, 1, UIFont.Small)
+                self:drawText(L().maxLevel, 10, innerY, 0.2, 1, 0.2, 1, UIFont.Small)
             end
             innerY = innerY + ROW_HEIGHT
         else
             -- Nenhuma pericia ganhou XP ainda nesta partida.
-            self:drawText("XP", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+            self:drawText(L().xpOnly, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
-            self:drawText("(no XP yet)", 10, innerY, 0.6, 0.6, 0.6, 1, UIFont.NewSmall)
+            self:drawText(L().noXPYet, 10, innerY, 0.6, 0.6, 0.6, 1, UIFont.NewSmall)
             self:drawXPFloaters(innerY)
             innerY = innerY + (ROW_HEIGHT * 2)
         end
@@ -679,7 +829,7 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block2Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawText("Date & Time", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().dateTime, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         for i, line in ipairs(liveLines) do
@@ -696,7 +846,7 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block3Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawText("Nutrition", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().nutrition, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         local weightLine = UZIR.Tracker.getWeightLine(player)
@@ -715,7 +865,7 @@ function UZIR_HUD:prerender()
 
         if hovering then
             local status = UZIR.Tracker.getWeightStatus(player)
-            self:drawText(status.text, 10, innerY, status.r, status.g, status.b, 1, UIFont.Small)
+            self:drawText(translateWeightStatus(status.text), 10, innerY, status.r, status.g, status.b, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
         end
 
@@ -727,15 +877,15 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block4Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawText("Weather/Season", 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().weatherSeason, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         local season, currentMonth, startMonth, endMonth = UZIR.Tracker.getSeasonInfo()
-        self:drawText(season .. "-Month " .. currentMonth, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+        self:drawText(string.format(L().monthLabelFmt, translateSeason(season), currentMonth), 10, innerY, 1, 1, 1, 1, UIFont.Medium)
         innerY = innerY + ROW_HEIGHT
 
         if hovering then
-            local durationLine = season .. " Duration Month " .. startMonth .. " to Month " .. endMonth
+            local durationLine = string.format(L().durationFmt, translateSeason(season), startMonth, endMonth)
             self:drawText(durationLine, 10, innerY, 1, 1, 1, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
         end
