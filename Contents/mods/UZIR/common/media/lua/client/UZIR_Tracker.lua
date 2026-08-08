@@ -21,8 +21,9 @@
 --   getFireKills(player)           - total de mortes por fogo (todo o save)
 --   getVehicleKills(player)        - total de atropelamentos (todo o save)
 --   getInvalidTotal(player)        - fogo + atropelamento somados
---   getHoursAlive(player)          - horas de vida do personagem atual
---   getLiveLines(player)           - linhas Hours/Days/Week/Month/Year ja desbloqueadas
+--   getHoursAlive(player)          - horas de vida do personagem atual (inteiro, usado na exportacao)
+--   getAliveClockLine(player)      - relogio "HH:MM:SS" do tempo de vida, pronto pra exibir
+--   getDaysAlive(player)           - total de dias vivos (numero cru, sem traducao)
 --   getKillCountLine(player)       - string "zKILL 0000" pronta pro HUD
 --   getWeightLine(player)          - string "Weight-85.5" pronta pro HUD
 --   getWeightStatus(player)        - {text, r, g, b} High Weight/Regular/Under Weight
@@ -396,26 +397,27 @@ function Tracker.getHoursAlive(player)
     return Util.sanitizeCount(player:getModData().UZIR_hoursAlive)
 end
 
--- Converte um total de horas em horas/dias/semanas/meses/anos restantes
--- (aproximacao: mes = 30 dias, ano = 365 dias).
-local function splitHoursIntoUnits(totalHours)
-    totalHours = totalHours or 0
+-- Horas totais de vida SEM arredondar, usadas so para exibir o relogio
+-- HH:MM:SS com precisao de minuto/segundo no bloco "Alive"/"Vivo".
+-- Mesma fonte nativa que Tracker.getHoursAlive (getHoursSurvived, com
+-- fallback pro contador manual em ModData) - so NAO passa pelo floor de
+-- Util.sanitizeCount, porque aqui precisamos da parte fracionaria.
+-- getHoursAlive() continua igual (arredondado), pois UZIR_Export.lua
+-- depende dela retornar um inteiro para o payload enviado ao site.
+local function getHoursAliveRaw(player)
+    player = player or Tracker.getPlayer()
+    if not player then return 0 end
 
-    local years = math.floor(totalHours / (24 * 365))
-    local rest = totalHours - years * 24 * 365
+    local ok, hours = pcall(function() return player:getHoursSurvived() end)
+    if ok and type(hours) == "number" and hours == hours and hours > 0 then
+        return hours
+    end
 
-    local months = math.floor(rest / (24 * 30))
-    rest = rest - months * 24 * 30
-
-    local weeks = math.floor(rest / (24 * 7))
-    rest = rest - weeks * 24 * 7
-
-    local days = math.floor(rest / 24)
-    rest = rest - days * 24
-
-    local hours = math.floor(rest)
-
-    return hours, days, weeks, months, years
+    local fallback = player:getModData().UZIR_hoursAlive
+    if type(fallback) ~= "number" or fallback ~= fallback or fallback < 0 then
+        return 0
+    end
+    return fallback
 end
 
 -- Strings ja formatadas no padrao pedido: "zKILL 0000"
@@ -423,37 +425,28 @@ function Tracker.getKillCountLine(player)
     return string.format("zKILL %04d", Tracker.getKillCount(player))
 end
 
--- Linhas do bloco "Live", desbloqueadas progressivamente:
---   Hours aparece desde o inicio (0-23)
---   Days  aparece só depois de completar 24h (1 dia)
---   Week  aparece só depois de completar 7 dias
---   Month aparece só depois de completar 30 dias
---   Year  aparece só depois de completar 365 dias
--- Cada uma nasce numa linha nova, dando a impressao de avanco/conquista.
--- Os rotulos foram renomeados a pedido dos jogadores que testaram o mod
--- (antes eram so "h"/"D"/"W"/"M"/"Y"). Hours/Days/Week/Month usam no
--- minimo 2 casas (crescem sozinhas se passarem de 99); Year usa so 1
--- casa minima, tambem crescendo conforme necessario.
-function Tracker.getLiveLines(player)
-    local totalHours = Tracker.getHoursAlive(player)
-    local h, d, w, m, y = splitHoursIntoUnits(totalHours)
+-- Relogio HH:MM:SS do tempo de vida do personagem atual, incrementando
+-- em tempo real conforme as horas de sobrevivencia (sem limite de 99 em
+-- HH - depois de varios dias passa de 2 digitos naturalmente, ex
+-- "240:15:32"). Espelha o relogio que a tela de Info do personagem ja
+-- mostra. Pronta para exibir, nao precisa de traducao (so numeros).
+function Tracker.getAliveClockLine(player)
+    local totalHours = getHoursAliveRaw(player)
 
-    local lines = {string.format("Hours-%02d", h)}
+    local hh = math.floor(totalHours)
+    local minutesFloat = (totalHours - hh) * 60
+    local mm = math.floor(minutesFloat)
+    local ss = math.floor((minutesFloat - mm) * 60)
 
-    if totalHours >= 24 then
-        table.insert(lines, string.format("Days-%02d", d))
-    end
-    if totalHours >= 24 * 7 then
-        table.insert(lines, string.format("Week-%02d", w))
-    end
-    if totalHours >= 24 * 30 then
-        table.insert(lines, string.format("Month-%02d", m))
-    end
-    if totalHours >= 24 * 365 then
-        table.insert(lines, string.format("Year-%d", y))
-    end
+    return string.format("%02d:%02d:%02d", hh, mm, ss)
+end
 
-    return lines
+-- Total de dias vivos do personagem atual (numero inteiro, horas totais
+-- / 24). Devolvido CRU (sem formatar como texto) porque a linha exibida
+-- ("XX Days" / "XX Dias") depende do idioma ativo - a formatacao/
+-- traducao acontece so no HUD (camada de apresentacao), nunca aqui.
+function Tracker.getDaysAlive(player)
+    return math.floor(getHoursAliveRaw(player) / 24)
 end
 
 -- ================== League: modo de jogo (Valid / inValid) ==================

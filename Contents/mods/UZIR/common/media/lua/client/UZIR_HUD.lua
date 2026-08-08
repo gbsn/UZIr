@@ -73,7 +73,6 @@ local CONTENT_START_Y = DIVIDER_Y + REPORT_BUTTON_GAP + REPORT_BUTTON_HEIGHT + 8
 local BLOCK_PADDING = 6          -- respiro interno de cada bloco (moldura)
 local BLOCK_GAP = 8              -- espaco entre um bloco e o proximo
 local ROW_HEIGHT = 20
-local LIVE_INDENT_STEP = 4       -- cada linha nova do bloco Hora/Data recua mais (efeito "escada")
 
 local BOTTOM_PADDING = 8
 
@@ -143,7 +142,7 @@ end
 
 local TOGGLABLE_BLOCKS = {
     {key = "xp", label = "XP"},
-    {key = "live", label = "Date & Time"},
+    {key = "live", label = "Alive"},
     {key = "charinfo", label = "Nutrition"},
     {key = "gameinfo", label = "Weather/Season"},
 }
@@ -195,7 +194,8 @@ end
 -- acontece so aqui, na camada de apresentacao, sem mexer no Tracker.
 local STRINGS = {
     en = {
-        dateTime = "Date & Time",
+        dateTime = "Alive",
+        daysAliveFmt = "%d Days",
         nutrition = "Nutrition",
         weatherSeason = "Weather/Season",
         report = "Report",
@@ -219,7 +219,8 @@ local STRINGS = {
         langLabel = "Language",
     },
     pt = {
-        dateTime = "Data e Hora",
+        dateTime = "Vivo",
+        daysAliveFmt = "%d Dias",
         nutrition = "Nutricao",
         weatherSeason = "Clima/Estacao",
         report = "Relatorio",
@@ -576,7 +577,9 @@ end
 function UZIR_HUD:prerender()
     local player = UZIR.Tracker.getPlayer()
 
-    local liveLines = player and UZIR.Tracker.getLiveLines(player) or {"h00"}
+    local liveLines = player
+        and {UZIR.Tracker.getAliveClockLine(player), string.format(L().daysAliveFmt, UZIR.Tracker.getDaysAlive(player))}
+        or {"00:00:00"}
     local fireKills = player and UZIR.Tracker.getFireKills(player) or 0
     local vehicleKills = player and UZIR.Tracker.getVehicleKills(player) or 0
     local hovering = isMouseHovering(self)
@@ -785,7 +788,23 @@ function UZIR_HUD:prerender()
 
     cursorY = cursorY + block1Height + BLOCK_GAP
 
-    -- ================== Bloco QMTR: XP (logo abaixo do zKILL) ==================
+    -- ================== Prioridade 2: Alive / Vivo (logo abaixo do zKILL) ==================
+    if showLive then
+        drawBlockFrame(self, cursorY, block2Height)
+        innerY = cursorY + BLOCK_PADDING
+
+        self:drawText(L().dateTime, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        innerY = innerY + ROW_HEIGHT
+
+        for _, line in ipairs(liveLines) do
+            self:drawText(line, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+            innerY = innerY + ROW_HEIGHT
+        end
+
+        cursorY = cursorY + block2Height + BLOCK_GAP
+    end
+
+    -- ================== Bloco QMTR: XP ==================
     if showXP then
         drawBlockFrame(self, cursorY, blockXPHeight)
         innerY = cursorY + BLOCK_PADDING
@@ -822,23 +841,6 @@ function UZIR_HUD:prerender()
         end
 
         cursorY = cursorY + blockXPHeight + BLOCK_GAP
-    end
-
-    -- ================== Prioridade 2: Hora e Data ==================
-    if showLive then
-        drawBlockFrame(self, cursorY, block2Height)
-        innerY = cursorY + BLOCK_PADDING
-
-        self:drawText(L().dateTime, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
-        innerY = innerY + ROW_HEIGHT
-
-        for i, line in ipairs(liveLines) do
-            local x2 = 10 + (i - 1) * LIVE_INDENT_STEP
-            self:drawText(line, x2, innerY, 1, 1, 1, 1, UIFont.Medium)
-            innerY = innerY + ROW_HEIGHT
-        end
-
-        cursorY = cursorY + block2Height + BLOCK_GAP
     end
 
     -- ================== Prioridade 3: Nutricao ==================
