@@ -190,11 +190,9 @@ end
 -- ================== Modo de exibicao (Solo/Live) ==================
 -- Preferencia de UI (igual idioma e blocos ligados/desligados) - guardada
 -- em ModData proprio. Padrao: Solo Mode (comportamento atual, sem
--- mudancas). Live Mode deixa o fundo do HUD transparente e aplica um
--- gradiente de cor animado no texto neutro (branco/cinza) - pensado pra
--- quem esta transmitindo a partida ao vivo. Elementos que ja tem cor
--- propria com significado (status de peso, MAX LEVEL, floaters de
--- kill/XP) NAO entram no gradiente, ficam do jeito que sempre foram.
+-- mudancas). Live Mode deixa o fundo do HUD transparente, mantendo o
+-- texto do jeito que sempre foi (cores originais, sem animacao) -
+-- pensado pra quem esta transmitindo a partida ao vivo.
 local DISPLAY_MODE_OPTIONS = {
     {key = "solo", label = "Solo Mode"},
     {key = "live", label = "Live Mode"},
@@ -209,34 +207,9 @@ local function getDisplayMode()
     return data.current or "solo"
 end
 
--- Estado do gradiente animado do Live Mode. currentT vai de 0 (branco)
--- a 1 (preto), passando por 0.5 (verde). A cada disparo, anima da
--- posicao atual ate uma nova posicao aleatoria em GRADIENT_TRANSITION_MS,
--- depois fica parado ate o proximo disparo (intervalo aleatorio entre
--- GRADIENT_MIN_GAP_MS e GRADIENT_MAX_GAP_MS).
-local GRADIENT_TRANSITION_MS = 6000
-local GRADIENT_MIN_GAP_MS = 30 * 1000
-local GRADIENT_MAX_GAP_MS = 20 * 60 * 1000
-
-local liveGradientState = {
-    currentT = 0,
-    fromT = 0,
-    toT = 0,
-    transitionStart = nil,
-    nextTriggerAt = nil,
-}
-
 local function setDisplayMode(key)
     local data = getDisplayModeData()
-    local wasLive = data.current == "live"
     data.current = key
-
-    -- A pedido do autor: a primeira transicao de cor do Live Mode
-    -- acontece assim que o modo e ativado, sem esperar o intervalo
-    -- aleatorio normal.
-    if key == "live" and not wasLive then
-        liveGradientState.nextTriggerAt = UZIR.Util.nowMs()
-    end
 end
 
 -- ================== Textos traduzidos (Portugues/Ingles) ==================
@@ -647,63 +620,6 @@ local function drawBlockFrame(self, y, height)
     self:drawRectBorder(4, y, self:getWidth() - 8, height, BLOCK_BORDER_COLOR.a, BLOCK_BORDER_COLOR.r, BLOCK_BORDER_COLOR.g, BLOCK_BORDER_COLOR.b)
 end
 
--- Cor no gradiente branco -> verde -> preto na posicao t (0 a 1).
--- t <= 0.5: interpola branco(1,1,1) ate verde(0,1,0)
--- t  > 0.5: interpola verde(0,1,0) ate preto(0,0,0)
-local function gradientColorAt(t)
-    if t <= 0.5 then
-        local k = t / 0.5
-        return 1 - k, 1, 1 - k
-    else
-        local k = (t - 0.5) / 0.5
-        return 0, 1 - k, 0
-    end
-end
-
--- Avanca o "relogio" do gradiente do Live Mode e devolve o RGB atual.
--- Ver comentario acima de liveGradientState para o funcionamento.
-local function getLiveGradientRGB()
-    local now = UZIR.Util.nowMs()
-    local s = liveGradientState
-
-    if not s.nextTriggerAt then
-        s.nextTriggerAt = now + math.random(GRADIENT_MIN_GAP_MS, GRADIENT_MAX_GAP_MS)
-    end
-
-    if not s.transitionStart and now >= s.nextTriggerAt then
-        s.fromT = s.currentT
-        s.toT = math.random(0, 10000) / 10000
-        s.transitionStart = now
-    end
-
-    if s.transitionStart then
-        local elapsed = now - s.transitionStart
-        if elapsed >= GRADIENT_TRANSITION_MS then
-            s.currentT = s.toT
-            s.transitionStart = nil
-            s.nextTriggerAt = now + math.random(GRADIENT_MIN_GAP_MS, GRADIENT_MAX_GAP_MS)
-        else
-            local p = elapsed / GRADIENT_TRANSITION_MS
-            s.currentT = s.fromT + (s.toT - s.fromT) * p
-        end
-    end
-
-    return gradientColorAt(s.currentT)
-end
-
--- Wrapper central usado pelos textos "neutros" do HUD (labels em cinza e
--- valores em branco). No Solo Mode desenha com a cor original, sem
--- nenhuma mudanca. No Live Mode ignora r/g/b recebidos e usa a cor atual
--- do gradiente. NAO usar em textos que ja tem cor propria com
--- significado (status de peso, MAX LEVEL, floaters de kill/XP) - esses
--- continuam chamando self:drawText diretamente.
-function UZIR_HUD:drawColorText(text, x, y, r, g, b, a, font)
-    if getDisplayMode() == "live" then
-        r, g, b = getLiveGradientRGB()
-    end
-    self:drawText(text, x, y, r, g, b, a, font)
-end
-
 -- ================== Renderizacao ==================
 
 function UZIR_HUD:prerender()
@@ -909,7 +825,7 @@ function UZIR_HUD:prerender()
     if not drawIcon(self, "UZIR_Infected", ICON_X, innerY - 2) then
         killTextX = 6
     end
-    self:drawColorText(killLine, killTextX, innerY, 1, 1, 1, 1, UIFont.Medium)
+    self:drawText(killLine, killTextX, innerY, 1, 1, 1, 1, UIFont.Medium)
     self:drawFloaters(innerY)
     innerY = innerY + ROW_HEIGHT
 
@@ -918,7 +834,7 @@ function UZIR_HUD:prerender()
         if not drawIcon(self, "UZIR_Fire", ICON_X, innerY - 2) then
             textX = 6
         end
-        self:drawColorText(string.format("%04d", fireKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
+        self:drawText(string.format("%04d", fireKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
         innerY = innerY + ROW_HEIGHT
     end
 
@@ -927,7 +843,7 @@ function UZIR_HUD:prerender()
         if not drawIcon(self, "UZIR_Vehicle", ICON_X, innerY - 2) then
             textX = 6
         end
-        self:drawColorText(string.format("%04d", vehicleKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
+        self:drawText(string.format("%04d", vehicleKills), textX, innerY, 1, 1, 1, 1, UIFont.Medium)
         innerY = innerY + ROW_HEIGHT
     end
 
@@ -938,11 +854,11 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block2Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawColorText(L().dateTime, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().dateTime, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         for _, line in ipairs(liveLines) do
-            self:drawColorText(line, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+            self:drawText(line, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
             innerY = innerY + ROW_HEIGHT
         end
 
@@ -961,26 +877,26 @@ function UZIR_HUD:prerender()
 
             -- Cabecalho "XP" + nome da ultima pericia treinada + nivel atual.
             local headerText = string.format(L().xpHeaderFmt, lastSkill, level)
-            self:drawColorText(headerText, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+            self:drawText(headerText, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
 
             -- XP total acumulado nessa pericia (a vida toda do personagem).
-            self:drawColorText(string.format("%.2f XP", currentXP), 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+            self:drawText(string.format("%.2f XP", currentXP), 10, innerY, 1, 1, 1, 1, UIFont.Medium)
             self:drawXPFloaters(innerY)
             innerY = innerY + ROW_HEIGHT
 
             -- Quanto falta pro proximo nivel, ou o texto de nivel maximo se ja no 10.
             if remainingXP then
-                self:drawColorText(string.format(L().toLvlFmt, remainingXP, level + 1), 10, innerY, 0.8, 0.8, 0.8, 1, UIFont.Small)
+                self:drawText(string.format(L().toLvlFmt, remainingXP, level + 1), 10, innerY, 0.8, 0.8, 0.8, 1, UIFont.Small)
             else
                 self:drawText(L().maxLevel, 10, innerY, 0.2, 1, 0.2, 1, UIFont.Small)
             end
             innerY = innerY + ROW_HEIGHT
         else
             -- Nenhuma pericia ganhou XP ainda nesta partida.
-            self:drawColorText(L().xpOnly, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+            self:drawText(L().xpOnly, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
-            self:drawColorText(L().noXPYet, 10, innerY, 0.6, 0.6, 0.6, 1, UIFont.NewSmall)
+            self:drawText(L().noXPYet, 10, innerY, 0.6, 0.6, 0.6, 1, UIFont.NewSmall)
             self:drawXPFloaters(innerY)
             innerY = innerY + (ROW_HEIGHT * 2)
         end
@@ -993,11 +909,11 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block3Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawColorText(L().nutrition, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().nutrition, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         local weightLine = UZIR.Tracker.getWeightLine(player)
-        self:drawColorText(weightLine, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+        self:drawText(weightLine, 10, innerY, 1, 1, 1, 1, UIFont.Medium)
 
         local indicator = UZIR.Tracker.getWeightIndicator(player)
         local okWidth, textWidth = pcall(function()
@@ -1024,16 +940,16 @@ function UZIR_HUD:prerender()
         drawBlockFrame(self, cursorY, block4Height)
         innerY = cursorY + BLOCK_PADDING
 
-        self:drawColorText(L().weatherSeason, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
+        self:drawText(L().weatherSeason, 10, innerY, 0.65, 0.65, 0.65, 1, UIFont.Small)
         innerY = innerY + ROW_HEIGHT
 
         local season, currentMonth, startMonth, endMonth = UZIR.Tracker.getSeasonInfo()
-        self:drawColorText(string.format(L().monthLabelFmt, translateSeason(season), currentMonth), 10, innerY, 1, 1, 1, 1, UIFont.Medium)
+        self:drawText(string.format(L().monthLabelFmt, translateSeason(season), currentMonth), 10, innerY, 1, 1, 1, 1, UIFont.Medium)
         innerY = innerY + ROW_HEIGHT
 
         if hovering then
             local durationLine = string.format(L().durationFmt, translateSeason(season), startMonth, endMonth)
-            self:drawColorText(durationLine, 10, innerY, 1, 1, 1, 1, UIFont.Small)
+            self:drawText(durationLine, 10, innerY, 1, 1, 1, 1, UIFont.Small)
             innerY = innerY + ROW_HEIGHT
         end
 
