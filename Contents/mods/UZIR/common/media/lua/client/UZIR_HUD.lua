@@ -672,7 +672,7 @@ local function getLiveGradientRGB()
 
     if not s.transitionStart and now >= s.nextTriggerAt then
         s.fromT = s.currentT
-        s.toT = math.random()
+        s.toT = math.random(0, 10000) / 10000
         s.transitionStart = now
     end
 
