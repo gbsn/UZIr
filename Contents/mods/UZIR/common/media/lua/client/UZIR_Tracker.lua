@@ -382,46 +382,47 @@ end
 
 -- ================== Tempo de vida (Live: h/D/W/M/Y) ==================
 
--- Horas totais de vida do personagem atual, direto de
--- player:getHoursSurvived() - mesma chamada usada (sem pcall, sem
--- complicacao) pelo mod de referencia "Twiston Stats", que confirmamos
--- funcionando de verdade no jogo. Uma tentativa anterior trocou isso
--- por getGameTime():getHoursSurvived() por engano (a doc oficial lista
--- getHoursSurvived so em GameTime, sem mencionar IsoPlayer) - mas essa
--- troca causava o relogio reiniciar a cada sessao, entao voltamos para
--- a chamada original, validada pelo mod de referencia.
+-- Horas totais de vida do personagem atual.
+--
+-- HISTORICO DA INVESTIGACAO (pra quem for mexer aqui depois):
+-- 1a tentativa: player:getHoursSurvived() com pcall -> sempre caia no
+--   fallback (o pcall falhava), entao nunca vimos o bug de verdade.
+-- 2a tentativa: getGameTime():getHoursSurvived() -> reiniciava a cada
+--   sessao nova, inaceitavel.
+-- 3a tentativa: player:getHoursSurvived() direto (sem pcall), copiando
+--   o mod de referencia "Twiston Stats" -> os numeros bateram com a
+--   tela nativa "Tempo de Sobrevivencia" do jogo (23 horas)... mas o
+--   AUTOR confirmou que isso esta ERRADO: o personagem tinha sobrevivido
+--   vários dias de verdade (o site UZIrVector, alimentado por
+--   exportacoes antigas que caiam no fallback, mostrava 8 dias -
+--   condizente com a memoria do autor). A explicacao: o sono acelera o
+--   tempo DE JOGO, que roda "no seu proprio tempo", sem relacao com o
+--   relogio real - e a funcao nativa (seja qual for a fonte exata)
+--   parece nao acompanhar isso direito.
+--
+-- CONCLUSAO E FONTE FINAL: o unico contador em que confiamos e o nosso
+-- proprio, alimentado por Events.EveryHours (ver onEveryHour acima) -
+-- ele dispara com base no RELOGIO DO JOGO (acelera certo durante o
+-- sono, por definicao) e fica salvo no ModData do personagem
+-- (sobrevive entre sessoes). Paramos de tentar qualquer funcao nativa
+-- de "horas sobrevividas".
 function Tracker.getHoursAlive(player)
     player = player or Tracker.getPlayer()
     if not player then return 0 end
 
-    local hours = player:getHoursSurvived() or 0
-    if hours > 0 then
-        return Util.sanitizeCount(hours)
-    end
-
     return Util.sanitizeCount(player:getModData().UZIR_hoursAlive)
 end
 
--- Horas totais de vida SEM arredondar, usadas so para exibir o relogio
--- HH:MM:SS com precisao de minuto/segundo no bloco "Alive"/"Vivo".
--- Mesma fonte que Tracker.getHoursAlive - so NAO passa pelo floor de
--- Util.sanitizeCount, porque aqui precisamos da parte fracionaria.
--- getHoursAlive() continua igual (arredondado), pois UZIR_Export.lua
--- depende dela retornar um inteiro para o payload enviado ao site.
+-- Mesma fonte que Tracker.getHoursAlive. Nao tem "Raw" fracionario de
+-- verdade porque o contador manual so incrementa de hora em hora (sem
+-- precisao de minuto/segundo) - decisao consciente do autor: preferir
+-- um numero de horas/dias CORRETO (tempo de jogo) a um relogio com
+-- minutos/segundos bonitos porem baseados em fonte nao confiavel.
+-- TODO (pedido do autor, sem prioridade agora): no futuro, adicionar
+-- TAMBEM uma contagem de tempo REAL (relogio de parede) como metrica
+-- separada, sem substituir esta.
 local function getHoursAliveRaw(player)
-    player = player or Tracker.getPlayer()
-    if not player then return 0 end
-
-    local hours = player:getHoursSurvived() or 0
-    if hours > 0 then
-        return hours
-    end
-
-    local fallback = player:getModData().UZIR_hoursAlive
-    if type(fallback) ~= "number" or fallback ~= fallback or fallback < 0 then
-        return 0
-    end
-    return fallback
+    return Tracker.getHoursAlive(player)
 end
 
 -- Strings ja formatadas no padrao pedido: "zKILL 0000"
@@ -429,20 +430,18 @@ function Tracker.getKillCountLine(player)
     return string.format("zKILL %04d", Tracker.getKillCount(player))
 end
 
--- Relogio HH:MM:SS do tempo de vida do personagem atual, incrementando
--- em tempo real conforme as horas de sobrevivencia (sem limite de 99 em
--- HH - depois de varios dias passa de 2 digitos naturalmente, ex
--- "240:15:32"). Espelha o relogio que a tela de Info do personagem ja
--- mostra. Pronta para exibir, nao precisa de traducao (so numeros).
+-- Relogio HH:MM:SS do tempo de vida do personagem atual, contado no
+-- tempo DE JOGO (nao tempo real - acelera certo durante o sono, pois a
+-- fonte e o contador manual por hora de jogo, ver comentario de
+-- Tracker.getHoursAlive acima). MM e SS ficam sempre "00" porque essa
+-- fonte so tem precisao de hora inteira - preferimos um numero de horas
+-- correto a minutos/segundos "bonitos" vindos de uma fonte que nao
+-- acompanha o tempo de jogo direito. Sem limite de 99 em HH - depois de
+-- varios dias passa de 2 digitos naturalmente (ex "240:00:00"). Pronta
+-- para exibir, nao precisa de traducao (so numeros).
 function Tracker.getAliveClockLine(player)
     local totalHours = getHoursAliveRaw(player)
-
-    local hh = math.floor(totalHours)
-    local minutesFloat = (totalHours - hh) * 60
-    local mm = math.floor(minutesFloat)
-    local ss = math.floor((minutesFloat - mm) * 60)
-
-    return string.format("%02d:%02d:%02d", hh, mm, ss)
+    return string.format("%02d:00:00", totalHours)
 end
 
 -- Total de dias vivos do personagem atual (numero inteiro, horas totais
