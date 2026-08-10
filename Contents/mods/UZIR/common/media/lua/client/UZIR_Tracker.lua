@@ -382,37 +382,21 @@ end
 
 -- ================== Tempo de vida (Live: h/D/W/M/Y) ==================
 
--- BUG CORRIGIDO: as duas funcoes abaixo chamavam player:getHoursSurvived(),
--- mas essa funcao NUNCA existiu em IsoPlayer - ela pertence a GameTime
--- (confirmado na doc oficial: projectzomboid.com/modding/zombie/GameTime.html,
--- assinatura "double getHoursSurvived()", sem parametro de jogador). A
--- chamada sempre falhava silenciosamente (pcall) e o mod sempre caia no
--- contador manual (EveryHours) - o que passava despercebido porque o
--- "Dias" antigo so aparecia quando >= 24h, escondendo o problema quando
--- o contador estava baixo. Agora usamos a fonte nativa correta
--- (getGameTime():getHoursSurvived(), tempo de mundo decorrido), com o
--- mesmo contador manual como fallback caso essa API mude no futuro.
-local function getEngineHoursSurvived()
-    local ok, gt = pcall(function() return getGameTime() end)
-    if not (ok and gt) then return nil end
-
-    local ok2, hours = pcall(function() return gt:getHoursSurvived() end)
-    if ok2 and type(hours) == "number" and hours == hours and hours >= 0 then
-        return hours
-    end
-    return nil
-end
-
--- Horas totais de vida do personagem atual. Preferimos o getter nativo
--- (se existir e retornar algo > 0); caso contrario usamos nosso
--- contador manual (EveryHours) guardado no ModData.
+-- Horas totais de vida do personagem atual, direto de
+-- player:getHoursSurvived() - mesma chamada usada (sem pcall, sem
+-- complicacao) pelo mod de referencia "Twiston Stats", que confirmamos
+-- funcionando de verdade no jogo. Uma tentativa anterior trocou isso
+-- por getGameTime():getHoursSurvived() por engano (a doc oficial lista
+-- getHoursSurvived so em GameTime, sem mencionar IsoPlayer) - mas essa
+-- troca causava o relogio reiniciar a cada sessao, entao voltamos para
+-- a chamada original, validada pelo mod de referencia.
 function Tracker.getHoursAlive(player)
     player = player or Tracker.getPlayer()
     if not player then return 0 end
 
-    local engineHours = getEngineHoursSurvived()
-    if engineHours and engineHours > 0 then
-        return Util.sanitizeCount(engineHours)
+    local hours = player:getHoursSurvived() or 0
+    if hours > 0 then
+        return Util.sanitizeCount(hours)
     end
 
     return Util.sanitizeCount(player:getModData().UZIR_hoursAlive)
@@ -420,19 +404,17 @@ end
 
 -- Horas totais de vida SEM arredondar, usadas so para exibir o relogio
 -- HH:MM:SS com precisao de minuto/segundo no bloco "Alive"/"Vivo".
--- Mesma fonte nativa que Tracker.getHoursAlive (getEngineHoursSurvived,
--- com fallback pro contador manual em ModData) - so NAO passa pelo
--- floor de Util.sanitizeCount, porque aqui precisamos da parte
--- fracionaria. getHoursAlive() continua igual (arredondado), pois
--- UZIR_Export.lua depende dela retornar um inteiro para o payload
--- enviado ao site.
+-- Mesma fonte que Tracker.getHoursAlive - so NAO passa pelo floor de
+-- Util.sanitizeCount, porque aqui precisamos da parte fracionaria.
+-- getHoursAlive() continua igual (arredondado), pois UZIR_Export.lua
+-- depende dela retornar um inteiro para o payload enviado ao site.
 local function getHoursAliveRaw(player)
     player = player or Tracker.getPlayer()
     if not player then return 0 end
 
-    local engineHours = getEngineHoursSurvived()
-    if engineHours and engineHours > 0 then
-        return engineHours
+    local hours = player:getHoursSurvived() or 0
+    if hours > 0 then
+        return hours
     end
 
     local fallback = player:getModData().UZIR_hoursAlive
