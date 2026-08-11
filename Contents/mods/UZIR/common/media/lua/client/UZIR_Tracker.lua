@@ -413,35 +413,47 @@ function Tracker.getHoursAlive(player)
     return Util.sanitizeCount(player:getModData().UZIR_hoursAlive)
 end
 
--- Mesma fonte que Tracker.getHoursAlive. Nao tem "Raw" fracionario de
--- verdade porque o contador manual so incrementa de hora em hora (sem
--- precisao de minuto/segundo) - decisao consciente do autor: preferir
--- um numero de horas/dias CORRETO (tempo de jogo) a um relogio com
--- minutos/segundos bonitos porem baseados em fonte nao confiavel.
--- TODO (pedido do autor, sem prioridade agora): no futuro, adicionar
--- TAMBEM uma contagem de tempo REAL (relogio de parede) como metrica
--- separada, sem substituir esta.
-local function getHoursAliveRaw(player)
-    return Tracker.getHoursAlive(player)
-end
-
 -- Strings ja formatadas no padrao pedido: "zKILL 0000"
 function Tracker.getKillCountLine(player)
     return string.format("zKILL %04d", Tracker.getKillCount(player))
 end
 
--- Relogio HH:MM:SS do tempo de vida do personagem atual, contado no
--- tempo DE JOGO (nao tempo real - acelera certo durante o sono, pois a
--- fonte e o contador manual por hora de jogo, ver comentario de
--- Tracker.getHoursAlive acima). MM e SS ficam sempre "00" porque essa
--- fonte so tem precisao de hora inteira - preferimos um numero de horas
--- correto a minutos/segundos "bonitos" vindos de uma fonte que nao
--- acompanha o tempo de jogo direito. Sem limite de 99 em HH - depois de
--- varios dias passa de 2 digitos naturalmente (ex "240:00:00"). Pronta
--- para exibir, nao precisa de traducao (so numeros).
+-- Minutos (com fracao) dentro da hora atual do relogio DO JOGO (0 a
+-- 59.999...), lidos direto de getGameTime():getMinutes(). Usado so para
+-- os campos MM:SS do relogio "Alive" - como e o relogio nativo do jogo,
+-- acelera certo durante o sono (e literalmente a fonte da aceleracao,
+-- nao uma copia dela). NAO usado para as horas totais (isso continua
+-- vindo do nosso contador manual, ver Tracker.getHoursAlive acima) -
+-- so pega emprestado o "quanto passou dentro da hora atual" pra dar
+-- vida ao relogio sem repetir o problema das tentativas anteriores.
+local function getCurrentGameMinutesFraction()
+    local ok, gt = pcall(function() return getGameTime() end)
+    if not (ok and gt) then return 0 end
+
+    local ok2, minutes = pcall(function() return gt:getMinutes() end)
+    if ok2 and type(minutes) == "number" and minutes == minutes and minutes >= 0 then
+        if minutes >= 60 then return 59.999 end
+        return minutes
+    end
+    return 0
+end
+
+-- Relogio HH:MM:SS do tempo de vida do personagem atual. HH vem do
+-- nosso contador confiavel (EveryHours, tempo de jogo, correto entre
+-- sessoes - ver Tracker.getHoursAlive). MM:SS vem do relogio ATUAL do
+-- jogo (getGameTime():getMinutes(), com fracao pros segundos) - ticka
+-- de verdade, acelera certo durante o sono, e vira exatamente junto com
+-- o incremento de HH (mesmo evento EveryHours). Sem limite de 99 em HH
+-- - depois de varios dias passa de 2 digitos naturalmente (ex
+-- "240:15:32"). Pronta para exibir, nao precisa de traducao.
 function Tracker.getAliveClockLine(player)
-    local totalHours = getHoursAliveRaw(player)
-    return string.format("%02d:00:00", totalHours)
+    local hh = Tracker.getHoursAlive(player)
+
+    local minutesFloat = getCurrentGameMinutesFraction()
+    local mm = math.floor(minutesFloat)
+    local ss = math.floor((minutesFloat - mm) * 60)
+
+    return string.format("%02d:%02d:%02d", hh, mm, ss)
 end
 
 -- Total de dias vivos do personagem atual (numero inteiro, horas totais
@@ -449,7 +461,7 @@ end
 -- ("XX Days" / "XX Dias") depende do idioma ativo - a formatacao/
 -- traducao acontece so no HUD (camada de apresentacao), nunca aqui.
 function Tracker.getDaysAlive(player)
-    return math.floor(getHoursAliveRaw(player) / 24)
+    return math.floor(Tracker.getHoursAlive(player) / 24)
 end
 
 -- ================== League: modo de jogo (Valid / inValid) ==================
