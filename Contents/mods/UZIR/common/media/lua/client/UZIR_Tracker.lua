@@ -438,22 +438,19 @@ local function getCurrentGameMinutesFraction()
     return 0
 end
 
--- Relogio HH:MM:SS do tempo de vida do personagem atual. HH vem do
+-- Relogio HH:MM do tempo de vida do personagem atual. HH vem do
 -- nosso contador confiavel (EveryHours, tempo de jogo, correto entre
--- sessoes - ver Tracker.getHoursAlive). MM:SS vem do relogio ATUAL do
--- jogo (getGameTime():getMinutes(), com fracao pros segundos) - ticka
--- de verdade, acelera certo durante o sono, e vira exatamente junto com
--- o incremento de HH (mesmo evento EveryHours). Sem limite de 99 em HH
--- - depois de varios dias passa de 2 digitos naturalmente (ex
--- "240:15:32"). Pronta para exibir, nao precisa de traducao.
+-- sessoes - ver Tracker.getHoursAlive). MM vem do relogio ATUAL do
+-- jogo (getGameTime():getMinutes()) - ticka de verdade, acelera certo
+-- durante o sono, e vira exatamente junto com o incremento de HH
+-- (mesmo evento EveryHours). Sem limite de 99 em HH - depois de varios
+-- dias passa de 2 digitos naturalmente (ex "240:15"). Pronta para
+-- exibir, nao precisa de traducao.
 function Tracker.getAliveClockLine(player)
     local hh = Tracker.getHoursAlive(player)
+    local mm = math.floor(getCurrentGameMinutesFraction())
 
-    local minutesFloat = getCurrentGameMinutesFraction()
-    local mm = math.floor(minutesFloat)
-    local ss = math.floor((minutesFloat - mm) * 60)
-
-    return string.format("%02d:%02d:%02d", hh, mm, ss)
+    return string.format("%02d:%02d", hh, mm)
 end
 
 -- Total de dias vivos do personagem atual (numero inteiro, horas totais
